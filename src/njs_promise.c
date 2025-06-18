@@ -59,50 +59,45 @@ static njs_int_t njs_promise_create_resolving_functions(njs_vm_t *vm,
 static njs_int_t njs_promise_value_constructor(njs_vm_t *vm, njs_value_t *value,
     njs_value_t *dst);
 static njs_int_t njs_promise_capability_executor(njs_vm_t *vm,
-    njs_value_t *args, njs_uint_t nargs, njs_index_t unused,
-    njs_value_t *retval);
+    njs_value_t *args, njs_uint_t nargs, njs_index_t retval);
+static njs_int_t njs_promise_host_rejection_tracker(njs_vm_t *vm,
+    njs_promise_t *promise, njs_promise_rejection_type_t operation);
 static njs_int_t njs_promise_resolve_function(njs_vm_t *vm, njs_value_t *args,
-    njs_uint_t nargs, njs_index_t unused, njs_value_t *retval);
+    njs_uint_t nargs, njs_index_t retval);
 static njs_int_t njs_promise_reject_function(njs_vm_t *vm, njs_value_t *args,
-    njs_uint_t nargs, njs_index_t unused, njs_value_t *retval);
+    njs_uint_t nargs, njs_index_t retval);
 static njs_int_t njs_promise_then_finally_function(njs_vm_t *vm,
-    njs_value_t *args, njs_uint_t nargs, njs_index_t unused,
-    njs_value_t *retval);
+    njs_value_t *args, njs_uint_t nargs, njs_index_t unused);
 static njs_int_t njs_promise_then_finally_return(njs_vm_t *vm,
-    njs_value_t *args, njs_uint_t nargs, njs_index_t unused,
-    njs_value_t *retval);
+    njs_value_t *args, njs_uint_t nargs, njs_index_t unused);
 static njs_int_t njs_promise_catch_finally_return(njs_vm_t *vm,
-    njs_value_t *args, njs_uint_t nargs, njs_index_t unused,
-    njs_value_t *retval);
+    njs_value_t *args, njs_uint_t nargs, njs_index_t unused);
 static njs_int_t njs_promise_reaction_job(njs_vm_t *vm, njs_value_t *args,
-    njs_uint_t nargs, njs_index_t unused, njs_value_t *retval);
+    njs_uint_t nargs, njs_index_t unused);
 static njs_int_t njs_promise_resolve_thenable_job(njs_vm_t *vm,
-    njs_value_t *args, njs_uint_t nargs, njs_index_t unused,
-    njs_value_t *retval);
+    njs_value_t *args, njs_uint_t nargs, njs_index_t unused);
 static njs_int_t njs_promise_perform_all(njs_vm_t *vm, njs_value_t *iterator,
     njs_promise_iterator_args_t *pargs, njs_iterator_handler_t handler,
     njs_value_t *retval);
 static njs_int_t njs_promise_perform_all_handler(njs_vm_t *vm,
-    njs_iterator_args_t *args, njs_value_t *value, int64_t index,
-    njs_value_t *retval);
+    njs_iterator_args_t *args, njs_value_t *value, int64_t index);
 static njs_int_t njs_promise_all_resolve_element_functions(njs_vm_t *vm,
-    njs_value_t *args, njs_uint_t nargs, njs_index_t unused,
-    njs_value_t *retval);
+    njs_value_t *args, njs_uint_t nargs, njs_index_t unused);
 static njs_int_t njs_promise_perform_all_settled_handler(njs_vm_t *vm,
-    njs_iterator_args_t *args, njs_value_t *value, int64_t index,
-    njs_value_t *retval);
+    njs_iterator_args_t *args, njs_value_t *value, int64_t index);
 static njs_int_t njs_promise_all_settled_element_functions(njs_vm_t *vm,
-    njs_value_t *args, njs_uint_t nargs, njs_index_t rejected,
-    njs_value_t *retval);
+    njs_value_t *args, njs_uint_t nargs, njs_index_t rejected);
 static njs_int_t njs_promise_perform_any_handler(njs_vm_t *vm,
-    njs_iterator_args_t *args, njs_value_t *value, int64_t index,
-    njs_value_t *retval);
+    njs_iterator_args_t *args, njs_value_t *value, int64_t index);
 static njs_int_t njs_promise_any_reject_element_functions(njs_vm_t *vm,
-    njs_value_t *args, njs_uint_t nargs, njs_index_t unused,
-    njs_value_t *retval);
+    njs_value_t *args, njs_uint_t nargs, njs_index_t unused);
 static njs_int_t njs_promise_perform_race_handler(njs_vm_t *vm,
-    njs_iterator_args_t *args, njs_value_t *value, int64_t index,
-    njs_value_t *retval);
+    njs_iterator_args_t *args, njs_value_t *value, int64_t index);
+
+
+static const njs_value_t  string_resolve = njs_string("resolve");
+static const njs_value_t  string_any_rejected =
+                                 njs_long_string("All promises were rejected");
 
 
 static njs_promise_t *
@@ -124,7 +119,7 @@ njs_promise_alloc(njs_vm_t *vm)
     promise->object.extensible = 1;
     promise->object.error_data = 0;
     promise->object.fast_array = 0;
-    promise->object.__proto__ = njs_vm_proto(vm, NJS_OBJ_TYPE_PROMISE);
+    promise->object.__proto__ = &vm->prototypes[NJS_OBJ_TYPE_PROMISE].object;
     promise->object.slots = NULL;
 
     data = (njs_promise_data_t *) ((uint8_t *) promise + sizeof(njs_promise_t));
@@ -149,7 +144,7 @@ memory_error:
 
 njs_int_t
 njs_promise_constructor(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+    njs_index_t unused)
 {
     njs_promise_t   *promise;
     njs_function_t  *function;
@@ -171,7 +166,7 @@ njs_promise_constructor(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
         return NJS_ERROR;
     }
 
-    njs_set_promise(retval, promise);
+    njs_set_promise(&vm->retval, promise);
 
     return NJS_OK;
 }
@@ -219,14 +214,12 @@ njs_promise_constructor_call(njs_vm_t *vm, njs_function_t *function)
     ret = njs_function_call(vm, function, &njs_value_undefined, arguments, 2,
                             &retval);
     if (njs_slow_path(ret != NJS_OK)) {
-        if (njs_slow_path(njs_is_memory_error(vm, &vm->exception))) {
+        if (njs_slow_path(njs_is_memory_error(vm, &vm->retval))) {
             return NULL;
         }
 
-        retval = njs_vm_exception(vm);
-
         ret = njs_function_call(vm, njs_function(&arguments[1]),
-                                &njs_value_undefined, &retval, 1, &retval);
+                                &njs_value_undefined, &vm->retval, 1, &retval);
         if (njs_slow_path(ret != NJS_OK)) {
             return NULL;
         }
@@ -258,7 +251,7 @@ njs_promise_create_function(njs_vm_t *vm, size_t context_size)
         context = NULL;
     }
 
-    function->object.__proto__ = njs_vm_proto(vm, NJS_OBJ_TYPE_FUNCTION);
+    function->object.__proto__ = &vm->prototypes[NJS_OBJ_TYPE_FUNCTION].object;
     function->object.shared_hash = vm->shared->arrow_instance_hash;
     function->object.type = NJS_FUNCTION;
     function->object.extensible = 1;
@@ -386,12 +379,15 @@ njs_promise_value_constructor(njs_vm_t *vm, njs_value_t *value,
 {
     njs_int_t  ret;
 
+    static const njs_value_t  string_constructor = njs_string("constructor");
+
     if (njs_is_function(value)) {
         *dst = *value;
         return NJS_OK;
     }
 
-    ret = njs_value_property(vm, value, NJS_ATOM_STRING_constructor, dst);
+    ret = njs_value_property(vm, value, njs_value_arg(&string_constructor),
+                             dst);
     if (njs_slow_path(ret == NJS_ERROR)) {
         return ret;
     }
@@ -407,7 +403,7 @@ njs_promise_value_constructor(njs_vm_t *vm, njs_value_t *value,
 
 static njs_int_t
 njs_promise_capability_executor(njs_vm_t *vm, njs_value_t *args,
-    njs_uint_t nargs, njs_index_t unused, njs_value_t *retval)
+    njs_uint_t nargs, njs_index_t unused)
 {
     njs_promise_context_t     *context;
     njs_promise_capability_t  *capability;
@@ -433,7 +429,40 @@ njs_promise_capability_executor(njs_vm_t *vm, njs_value_t *args,
     capability->resolve = *njs_arg(args, nargs, 1);
     capability->reject = *njs_arg(args, nargs, 2);
 
-    njs_value_assign(retval, &njs_value_undefined);
+    njs_vm_retval_set(vm, &njs_value_undefined);
+
+    return NJS_OK;
+}
+
+
+njs_inline njs_int_t
+njs_promise_add_event(njs_vm_t *vm, njs_function_t *function, njs_value_t *args,
+    njs_uint_t nargs)
+{
+    njs_event_t  *event;
+
+    event = njs_mp_zalloc(vm->mem_pool, sizeof(njs_event_t));
+    if (njs_slow_path(event == NULL)) {
+        njs_memory_error(vm);
+        return NJS_ERROR;
+    }
+
+    event->function = function;
+    event->once = 1;
+
+    if (nargs != 0) {
+        event->args = njs_mp_alloc(vm->mem_pool, sizeof(njs_value_t) * nargs);
+        if (njs_slow_path(event->args == NULL)) {
+            njs_memory_error(vm);
+            return NJS_ERROR;
+        }
+
+        memcpy(event->args, args, sizeof(njs_value_t) * nargs);
+
+        event->nargs = nargs;
+    }
+
+    njs_queue_insert_tail(&vm->promise_events, &event->link);
 
     return NJS_OK;
 }
@@ -457,16 +486,12 @@ njs_promise_trigger_reactions(njs_vm_t *vm, njs_value_t *value,
 
         function = njs_promise_create_function(vm,
                                                sizeof(njs_promise_context_t));
-        if (njs_slow_path(function == NULL)) {
-            return njs_value_arg(&njs_value_null);
-        }
-
         function->u.native = njs_promise_reaction_job;
 
         njs_set_data(&arguments[0], reaction, 0);
         arguments[1] = *value;
 
-        ret = njs_vm_enqueue_job(vm, function, arguments, 2);
+        ret = njs_promise_add_event(vm, function, arguments, 2);
         if (njs_slow_path(ret != NJS_OK)) {
             return njs_value_arg(&njs_value_null);
         }
@@ -507,8 +532,8 @@ njs_promise_fulfill(njs_vm_t *vm, njs_promise_t *promise, njs_value_t *value)
 njs_inline njs_value_t *
 njs_promise_reject(njs_vm_t *vm, njs_promise_t *promise, njs_value_t *reason)
 {
+    njs_int_t           ret;
     njs_queue_t         queue;
-    njs_value_t         promise_value;
     njs_promise_data_t  *data;
 
     data = njs_data(&promise->value);
@@ -517,10 +542,10 @@ njs_promise_reject(njs_vm_t *vm, njs_promise_t *promise, njs_value_t *reason)
     data->state = NJS_PROMISE_REJECTED;
 
     if (!data->is_handled) {
-        if (vm->rejection_tracker != NULL) {
-            njs_set_promise(&promise_value, promise);
-            vm->rejection_tracker(vm, vm->rejection_tracker_opaque, 0,
-                                  &promise_value, reason);
+        ret = njs_promise_host_rejection_tracker(vm, promise,
+                                                 NJS_PROMISE_REJECT);
+        if (njs_slow_path(ret != NJS_OK)) {
+            return njs_value_arg(&njs_value_null);
         }
     }
 
@@ -542,13 +567,68 @@ njs_promise_reject(njs_vm_t *vm, njs_promise_t *promise, njs_value_t *reason)
 
 
 static njs_int_t
+njs_promise_host_rejection_tracker(njs_vm_t *vm, njs_promise_t *promise,
+    njs_promise_rejection_type_t operation)
+{
+    uint32_t            i, length;
+    njs_value_t         *value;
+    njs_promise_data_t  *data;
+
+    if (vm->options.unhandled_rejection
+        == NJS_VM_OPT_UNHANDLED_REJECTION_IGNORE)
+    {
+        return NJS_OK;
+    }
+
+    if (vm->promise_reason == NULL) {
+        vm->promise_reason = njs_array_alloc(vm, 1, 0, NJS_ARRAY_SPARE);
+        if (njs_slow_path(vm->promise_reason == NULL)) {
+            return NJS_ERROR;
+        }
+    }
+
+    data = njs_data(&promise->value);
+
+    if (operation == NJS_PROMISE_REJECT) {
+        if (vm->promise_reason != NULL) {
+            return njs_array_add(vm, vm->promise_reason, &data->result);
+        }
+
+    } else {
+        value = vm->promise_reason->start;
+        length = vm->promise_reason->length;
+
+        for (i = 0; i < length; i++) {
+            if (njs_values_same(&value[i], &data->result)) {
+                length--;
+
+                if (i < length) {
+                    memmove(&value[i], &value[i + 1],
+                            sizeof(njs_value_t) * (length - i));
+                }
+
+                break;
+            }
+        }
+
+        vm->promise_reason->length = length;
+    }
+
+    return NJS_OK;
+}
+
+
+static njs_int_t
 njs_promise_invoke_then(njs_vm_t *vm, njs_value_t *promise, njs_value_t *args,
-    njs_int_t nargs, njs_value_t *retval)
+    njs_int_t nargs)
 {
     njs_int_t    ret;
     njs_value_t  function;
 
-    ret = njs_value_property(vm, promise, NJS_ATOM_STRING_then, &function);
+    static const njs_value_t  string_then = njs_string("then");
+
+    ret = njs_value_property(vm, promise, njs_value_arg(&string_then),
+                             &function);
     if (njs_slow_path(ret != NJS_OK)) {
         if (ret == NJS_DECLINED) {
             goto failed;
@@ -559,7 +639,7 @@ njs_promise_invoke_then(njs_vm_t *vm, njs_value_t *promise, njs_value_t *args,
 
     if (njs_fast_path(njs_is_function(&function))) {
         return njs_function_call(vm, njs_function(&function), promise, args,
-                                 nargs, retval);
+                                 nargs, &vm->retval);
     }
 
 failed:
@@ -572,7 +652,7 @@ failed:
 
 static njs_int_t
 njs_promise_resolve_function(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+    njs_index_t unused)
 {
     njs_int_t              ret;
     njs_value_t            *resolution, error, then, arguments[3];
@@ -581,12 +661,14 @@ njs_promise_resolve_function(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
     njs_native_frame_t     *active_frame;
     njs_promise_context_t  *context;
 
+    static const njs_value_t  string_then = njs_string("then");
+
     active_frame = vm->top_frame;
     context = active_frame->function->context;
     promise = njs_promise(&context->promise);
 
     if (*context->resolved_ref) {
-        njs_value_assign(retval, &njs_value_undefined);
+        njs_vm_retval_set(vm, &njs_value_undefined);
         return NJS_OK;
     }
 
@@ -594,14 +676,14 @@ njs_promise_resolve_function(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
 
     resolution = njs_arg(args, nargs, 1);
 
-    if (njs_values_same(vm, resolution, &context->promise)) {
+    if (njs_values_same(resolution, &context->promise)) {
         njs_error_fmt_new(vm, &error, NJS_OBJ_TYPE_TYPE_ERROR,
                           "promise self resolution");
         if (njs_slow_path(!njs_is_error(&error))) {
             return NJS_ERROR;
         }
 
-        njs_value_assign(retval, njs_promise_reject(vm, promise, &error));
+        njs_vm_retval_set(vm, njs_promise_reject(vm, promise, &error));
 
         return NJS_OK;
     }
@@ -610,16 +692,15 @@ njs_promise_resolve_function(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
         goto fulfill;
     }
 
-    ret = njs_value_property(vm, resolution, NJS_ATOM_STRING_then, &then);
+    ret = njs_value_property(vm, resolution, njs_value_arg(&string_then),
+                             &then);
     if (njs_slow_path(ret == NJS_ERROR)) {
-        if (njs_slow_path(njs_is_memory_error(vm, &vm->exception))) {
+        if (njs_slow_path(njs_is_memory_error(vm, &vm->retval))) {
             return NJS_ERROR;
         }
 
-        error = njs_vm_exception(vm);
-        njs_value_assign(retval, njs_promise_reject(vm, promise, &error));
-
-        if (njs_slow_path(njs_is_null(retval))) {
+        njs_vm_retval_set(vm, njs_promise_reject(vm, promise, &vm->retval));
+        if (njs_slow_path(njs_vm_retval(vm)->type == NJS_NULL)) {
             return NJS_ERROR;
         }
 
@@ -641,19 +722,19 @@ njs_promise_resolve_function(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
 
     function->u.native = njs_promise_resolve_thenable_job;
 
-    ret = njs_vm_enqueue_job(vm, function, arguments, 3);
+    ret = njs_promise_add_event(vm, function, arguments, 3);
     if (njs_slow_path(ret != NJS_OK)) {
         return ret;
     }
 
-    njs_value_assign(retval, &njs_value_undefined);
+    njs_vm_retval_set(vm, &njs_value_undefined);
 
     return NJS_OK;
 
 fulfill:
 
-    njs_value_assign(retval, njs_promise_fulfill(vm, promise, resolution));
-    if (njs_slow_path(njs_is_null(retval))) {
+    njs_vm_retval_set(vm, njs_promise_fulfill(vm, promise, resolution));
+    if (njs_slow_path(njs_vm_retval(vm)->type == NJS_NULL)) {
         return NJS_ERROR;
     }
 
@@ -663,57 +744,66 @@ fulfill:
 
 static njs_int_t
 njs_promise_object_resolve(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+    njs_index_t unused)
 {
+    njs_promise_t  *promise;
+
     if (njs_slow_path(!njs_is_object(njs_argument(args, 0)))) {
         njs_type_error(vm, "this value is not an object");
         return NJS_ERROR;
     }
 
-    return njs_promise_resolve(vm, njs_argument(args, 0),
-                               njs_arg(args, nargs, 1), retval);
+    promise = njs_promise_resolve(vm, njs_argument(args, 0),
+                                  njs_arg(args, nargs, 1));
+    if (njs_slow_path(promise == NULL)) {
+        return NJS_ERROR;
+    }
+
+    njs_set_promise(&vm->retval, promise);
+
+    return NJS_OK;
 }
 
 
-njs_int_t
-njs_promise_resolve(njs_vm_t *vm, njs_value_t *constructor, njs_value_t *x,
-    njs_value_t *retval)
+njs_promise_t *
+njs_promise_resolve(njs_vm_t *vm, njs_value_t *constructor, njs_value_t *x)
 {
     njs_int_t                 ret;
     njs_value_t               value;
     njs_promise_capability_t  *capability;
 
+    static const njs_value_t  string_constructor = njs_string("constructor");
+
     if (njs_is_promise(x)) {
-        ret = njs_value_property(vm, x, NJS_ATOM_STRING_constructor, &value);
+        ret = njs_value_property(vm, x, njs_value_arg(&string_constructor),
+                                 &value);
         if (njs_slow_path(ret == NJS_ERROR)) {
-            return NJS_ERROR;
+            return NULL;
         }
 
-        if (njs_values_same(vm, &value, constructor)) {
-            njs_value_assign(retval, x);
-            return NJS_OK;
+        if (njs_values_same(&value, constructor)) {
+            return njs_promise(x);
         }
     }
 
     capability = njs_promise_new_capability(vm, constructor);
     if (njs_slow_path(capability == NULL)) {
-        return NJS_ERROR;
+        return NULL;
     }
 
     ret = njs_function_call(vm, njs_function(&capability->resolve),
                             &njs_value_undefined, x, 1, &value);
     if (njs_slow_path(ret != NJS_OK)) {
-        return ret;
+        return NULL;
     }
 
-    njs_value_assign(retval, &capability->promise);
-    return NJS_OK;
+    return njs_promise(&capability->promise);
 }
 
 
 static njs_int_t
 njs_promise_reject_function(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+    njs_index_t unused)
 {
     njs_value_t            *value;
     njs_native_frame_t     *active_frame;
@@ -723,7 +813,7 @@ njs_promise_reject_function(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
     context = active_frame->function->context;
 
     if (*context->resolved_ref) {
-        njs_value_assign(retval, &njs_value_undefined);
+        njs_vm_retval_set(vm, &njs_value_undefined);
         return NJS_OK;
     }
 
@@ -735,7 +825,7 @@ njs_promise_reject_function(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
         return NJS_ERROR;
     }
 
-    njs_value_assign(retval, value);
+    njs_vm_retval_set(vm, value);
 
     return NJS_OK;
 }
@@ -743,7 +833,7 @@ njs_promise_reject_function(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
 
 static njs_int_t
 njs_promise_object_reject(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+    njs_index_t unused)
 {
     njs_int_t                 ret;
     njs_value_t               value;
@@ -766,7 +856,7 @@ njs_promise_object_reject(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
         return ret;
     }
 
-    njs_value_assign(retval, &capability->promise);
+    njs_vm_retval_set(vm, &capability->promise);
 
     return NJS_OK;
 }
@@ -774,7 +864,7 @@ njs_promise_object_reject(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
 
 static njs_int_t
 njs_promise_prototype_then(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+    njs_index_t unused)
 {
     njs_int_t                 ret;
     njs_value_t               *promise, *fulfilled, *rejected, constructor;
@@ -788,11 +878,6 @@ njs_promise_prototype_then(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
     }
 
     function = njs_promise_create_function(vm, sizeof(njs_promise_context_t));
-    if (njs_slow_path(function == NULL)) {
-        /* vm error is already set by njs_promise_create_function */
-        return NJS_ERROR;
-    }
-
     function->u.native = njs_promise_constructor;
 
     njs_set_function(&constructor, function);
@@ -812,7 +897,7 @@ njs_promise_prototype_then(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
     rejected = njs_arg(args, nargs, 2);
 
     return njs_promise_perform_then(vm, promise, fulfilled, rejected,
-                                    capability, retval);
+                                    capability);
 
 failed:
 
@@ -825,10 +910,10 @@ failed:
 njs_int_t
 njs_promise_perform_then(njs_vm_t *vm, njs_value_t *value,
     njs_value_t *fulfilled, njs_value_t *rejected,
-    njs_promise_capability_t *capability, njs_value_t *retval)
+    njs_promise_capability_t *capability)
 {
     njs_int_t               ret;
-    njs_value_t             arguments[2], promise_value;
+    njs_value_t             arguments[2];
     njs_promise_t           *promise;
     njs_function_t          *function;
     njs_promise_data_t      *data;
@@ -881,10 +966,10 @@ njs_promise_perform_then(njs_vm_t *vm, njs_value_t *value,
         if (data->state == NJS_PROMISE_REJECTED) {
             njs_set_data(&arguments[0], rejected_reaction, 0);
 
-            if (vm->rejection_tracker != NULL) {
-                njs_set_promise(&promise_value, promise);
-                vm->rejection_tracker(vm, vm->rejection_tracker_opaque, 1,
-                                      &promise_value, &data->result);
+            ret = njs_promise_host_rejection_tracker(vm, promise,
+                                                     NJS_PROMISE_HANDLE);
+            if (njs_slow_path(ret != NJS_OK)) {
+                return ret;
             }
 
         } else {
@@ -893,7 +978,7 @@ njs_promise_perform_then(njs_vm_t *vm, njs_value_t *value,
 
         arguments[1] = data->result;
 
-        ret = njs_vm_enqueue_job(vm, function, arguments, 2);
+        ret = njs_promise_add_event(vm, function, arguments, 2);
         if (njs_slow_path(ret != NJS_OK)) {
             return ret;
         }
@@ -902,10 +987,10 @@ njs_promise_perform_then(njs_vm_t *vm, njs_value_t *value,
     data->is_handled = 1;
 
     if (capability == NULL) {
-        njs_set_undefined(retval);
+        njs_vm_retval_set(vm, &njs_value_undefined);
 
     } else {
-        njs_value_assign(retval, &capability->promise);
+        njs_vm_retval_set(vm, &capability->promise);
     }
 
     return NJS_OK;
@@ -914,21 +999,20 @@ njs_promise_perform_then(njs_vm_t *vm, njs_value_t *value,
 
 static njs_int_t
 njs_promise_prototype_catch(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+    njs_index_t unused)
 {
     njs_value_t  arguments[2];
 
     arguments[0] = njs_value_undefined;
     arguments[1] = *njs_arg(args, nargs, 1);
 
-    return njs_promise_invoke_then(vm, njs_argument(args,  0), arguments, 2,
-                                   retval);
+    return njs_promise_invoke_then(vm, njs_argument(args,  0), arguments, 2);
 }
 
 
 static njs_int_t
 njs_promise_prototype_finally(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+    njs_index_t unused)
 {
     njs_int_t              ret;
     njs_value_t            *promise, *finally, constructor, arguments[2];
@@ -959,7 +1043,7 @@ njs_promise_prototype_finally(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
         arguments[0] = *finally;
         arguments[1] = *finally;
 
-        return njs_promise_invoke_then(vm, promise, arguments, 2, retval);
+        return njs_promise_invoke_then(vm, promise, arguments, 2);
     }
 
     function = njs_promise_create_function(vm, sizeof(njs_promise_context_t));
@@ -993,16 +1077,17 @@ njs_promise_prototype_finally(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
 
     njs_set_function(&arguments[1], function);
 
-    return njs_promise_invoke_then(vm, promise, arguments, 2, retval);
+    return njs_promise_invoke_then(vm, promise, arguments, 2);
 }
 
 
 static njs_int_t
 njs_promise_then_finally_function(njs_vm_t *vm, njs_value_t *args,
-    njs_uint_t nargs, njs_index_t unused, njs_value_t *retval)
+    njs_uint_t nargs, njs_index_t unused)
 {
     njs_int_t              ret;
-    njs_value_t            value, argument;
+    njs_value_t            value, retval, argument;
+    njs_promise_t          *promise;
     njs_function_t         *function;
     njs_native_frame_t     *frame;
     njs_promise_context_t  *context;
@@ -1011,15 +1096,17 @@ njs_promise_then_finally_function(njs_vm_t *vm, njs_value_t *args,
     context = frame->function->context;
 
     ret = njs_function_call(vm, njs_function(&context->finally),
-                            &njs_value_undefined, args, 0, &value);
+                            &njs_value_undefined, args, 0, &retval);
     if (njs_slow_path(ret != NJS_OK)) {
         return ret;
     }
 
-    ret = njs_promise_resolve(vm, &context->constructor, &value, &value);
-    if (njs_slow_path(ret != NJS_OK)) {
+    promise = njs_promise_resolve(vm, &context->constructor, &retval);
+    if (njs_slow_path(promise == NULL)) {
         return NJS_ERROR;
     }
+
+    njs_set_promise(&value, promise);
 
     function = njs_promise_create_function(vm, sizeof(njs_value_t));
     if (njs_slow_path(function == NULL)) {
@@ -1032,40 +1119,42 @@ njs_promise_then_finally_function(njs_vm_t *vm, njs_value_t *args,
 
     njs_set_function(&argument, function);
 
-    return njs_promise_invoke_then(vm, &value, &argument, 1, retval);
+    return njs_promise_invoke_then(vm, &value, &argument, 1);
 }
 
 
 static njs_int_t
 njs_promise_then_finally_return(njs_vm_t *vm, njs_value_t *args,
-    njs_uint_t nargs, njs_index_t unused, njs_value_t *retval)
+    njs_uint_t nargs, njs_index_t unused)
 {
-    njs_value_assign(retval, vm->top_frame->function->context);
+    njs_vm_retval_set(vm, vm->top_frame->function->context);
     return NJS_OK;
 }
 
 
 static njs_int_t
 njs_promise_catch_finally_return(njs_vm_t *vm, njs_value_t *args,
-    njs_uint_t nargs, njs_index_t unused, njs_value_t *retval)
+    njs_uint_t nargs, njs_index_t unused)
 {
-    njs_vm_throw(vm, vm->top_frame->function->context);
+    njs_vm_retval_set(vm, vm->top_frame->function->context);
     return NJS_ERROR;
 }
 
 
 static njs_int_t
 njs_promise_reaction_job(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+    njs_index_t unused)
 {
     njs_int_t                 ret;
     njs_bool_t                is_error;
-    njs_value_t               value, *argument;
+    njs_value_t               *value, *argument, retval;
     njs_promise_reaction_t    *reaction;
     njs_promise_capability_t  *capability;
 
-    reaction = njs_data(njs_arg(args, nargs, 1));
+    value = njs_arg(args, nargs, 1);
     argument = njs_arg(args, nargs, 2);
+
+    reaction = njs_data(value);
     capability = reaction->capability;
 
     is_error = 0;
@@ -1075,34 +1164,33 @@ njs_promise_reaction_job(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
             is_error = 1;
         }
 
-        njs_value_assign(&value, argument);
+        retval = *argument;
 
     } else {
         ret = njs_function_call(vm, njs_function(&reaction->handler),
-                                &njs_value_undefined, argument, 1, &value);
+                                &njs_value_undefined, argument, 1, &retval);
         if (njs_slow_path(ret != NJS_OK)) {
-            if (njs_slow_path(njs_is_memory_error(vm, &vm->exception))) {
+            if (njs_slow_path(njs_is_memory_error(vm, &vm->retval))) {
                 return NJS_ERROR;
             }
 
-            value = njs_vm_exception(vm);
-
+            retval = vm->retval;
             is_error = 1;
         }
     }
 
     if (capability == NULL) {
-        njs_value_assign(retval, &value);
+        njs_vm_retval_set(vm, &retval);
         return NJS_OK;
     }
 
     if (is_error) {
         ret = njs_function_call(vm, njs_function(&capability->reject),
-                                &njs_value_undefined, &value, 1, retval);
+                                &njs_value_undefined, &retval, 1, &vm->retval);
 
     } else {
         ret = njs_function_call(vm, njs_function(&capability->resolve),
-                                &njs_value_undefined, &value, 1, retval);
+                                &njs_value_undefined, &retval, 1, &vm->retval);
     }
 
     if (njs_slow_path(ret != NJS_OK)) {
@@ -1115,10 +1203,10 @@ njs_promise_reaction_job(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
 
 static njs_int_t
 njs_promise_resolve_thenable_job(njs_vm_t *vm, njs_value_t *args,
-    njs_uint_t nargs, njs_index_t unused, njs_value_t *retval)
+    njs_uint_t nargs, njs_index_t unused)
 {
     njs_int_t    ret;
-    njs_value_t  *promise, value, arguments[2];
+    njs_value_t  *promise, retval, arguments[2];
 
     promise = njs_arg(args, nargs, 1);
 
@@ -1129,17 +1217,16 @@ njs_promise_resolve_thenable_job(njs_vm_t *vm, njs_value_t *args,
     }
 
     ret = njs_function_call(vm, njs_function(njs_arg(args, nargs, 3)),
-                            njs_arg(args, nargs, 2), arguments, 2, &value);
+                            njs_arg(args, nargs, 2), arguments, 2, &retval);
     if (njs_slow_path(ret != NJS_OK)) {
 
-        if (njs_slow_path(njs_is_memory_error(vm, &vm->exception))) {
+        if (njs_slow_path(njs_is_memory_error(vm, &vm->retval))) {
             return NJS_ERROR;
         }
 
-        value = njs_vm_exception(vm);
-
         ret = njs_function_call(vm, njs_function(&arguments[1]),
-                                &njs_value_undefined, &value, 1, retval);
+                                &njs_value_undefined, &vm->retval, 1,
+                                &vm->retval);
         if (njs_slow_path(ret != NJS_OK)) {
             return NJS_ERROR;
         }
@@ -1151,7 +1238,7 @@ njs_promise_resolve_thenable_job(njs_vm_t *vm, njs_value_t *args,
 
 static njs_int_t
 njs_promise_all(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t function_type, njs_value_t *retval)
+    njs_index_t function_type)
 {
     njs_int_t                    ret;
     njs_value_t                  *promise_ctor, resolve;
@@ -1165,7 +1252,7 @@ njs_promise_all(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
         return NJS_ERROR;
     }
 
-    ret = njs_value_property(vm, promise_ctor, NJS_ATOM_STRING_resolve,
+    ret = njs_value_property(vm, promise_ctor, njs_value_arg(&string_resolve),
                              &resolve);
     if (njs_slow_path(ret == NJS_ERROR)) {
         return ret;
@@ -1194,7 +1281,7 @@ njs_promise_all(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
     }
 
     return njs_promise_perform_all(vm, njs_arg(args, nargs, 1), &pargs,
-                                   handler, retval);
+                                   handler, &vm->retval);
 }
 
 
@@ -1205,7 +1292,7 @@ njs_promise_perform_all(njs_vm_t *vm, njs_value_t *iterator,
 {
     int64_t       length;
     njs_int_t     ret;
-    njs_value_t   argument, message;
+    njs_value_t   argument;
     njs_object_t  *error;
 
     if (njs_slow_path(!njs_is_object(pargs->constructor))) {
@@ -1233,10 +1320,10 @@ njs_promise_perform_all(njs_vm_t *vm, njs_value_t *iterator,
 
     (*pargs->remaining) = 1;
 
-    njs_value_assign(&pargs->args.value, iterator);
+    pargs->args.value = iterator;
     pargs->args.to = length;
 
-    ret = njs_object_iterate(vm, &pargs->args, handler, retval);
+    ret = njs_object_iterate(vm, &pargs->args, handler);
     if (njs_slow_path(ret == NJS_ERROR)) {
         return ret;
     }
@@ -1245,13 +1332,10 @@ njs_promise_perform_all(njs_vm_t *vm, njs_value_t *iterator,
         njs_mp_free(vm->mem_pool, pargs->remaining);
 
         njs_set_array(&argument, pargs->args.data);
-        njs_atom_to_value(vm, &message,
-                          NJS_ATOM_STRING_All_promises_were_rejected);
 
         if (handler == njs_promise_perform_any_handler) {
-            error = njs_error_alloc(vm,
-                                njs_vm_proto(vm, NJS_OBJ_TYPE_AGGREGATE_ERROR),
-                                NULL, &message, &argument);
+            error = njs_error_alloc(vm, NJS_OBJ_TYPE_AGGREGATE_ERROR,
+                                    NULL, &string_any_rejected, &argument);
             if (njs_slow_path(error == NULL)) {
                 return NJS_ERROR;
             }
@@ -1266,7 +1350,7 @@ njs_promise_perform_all(njs_vm_t *vm, njs_value_t *iterator,
         }
     }
 
-    njs_value_assign(retval, &pargs->capability->promise);
+    *retval = pargs->capability->promise;
 
     return NJS_OK;
 }
@@ -1274,7 +1358,7 @@ njs_promise_perform_all(njs_vm_t *vm, njs_value_t *iterator,
 
 static njs_int_t
 njs_promise_perform_all_handler(njs_vm_t *vm, njs_iterator_args_t *args,
-    njs_value_t *value, int64_t index, njs_value_t *retval)
+    njs_value_t *value, int64_t index)
 {
     njs_int_t                    ret;
     njs_array_t                  *array;
@@ -1329,7 +1413,7 @@ njs_promise_perform_all_handler(njs_vm_t *vm, njs_iterator_args_t *args,
     njs_set_function(&arguments[0], on_fulfilled);
     arguments[1] = capability->reject;
 
-    ret = njs_promise_invoke_then(vm, &next, arguments, 2, retval);
+    ret = njs_promise_invoke_then(vm, &next, arguments, 2);
     if (njs_slow_path(ret == NJS_ERROR)) {
         return ret;
     }
@@ -1340,7 +1424,7 @@ njs_promise_perform_all_handler(njs_vm_t *vm, njs_iterator_args_t *args,
 
 static njs_int_t
 njs_promise_all_resolve_element_functions(njs_vm_t *vm, njs_value_t *args,
-    njs_uint_t nargs, njs_index_t unused, njs_value_t *retval)
+    njs_uint_t nargs, njs_index_t unused)
 {
     njs_int_t                  ret;
     njs_value_t                arr_value;
@@ -1349,7 +1433,7 @@ njs_promise_all_resolve_element_functions(njs_vm_t *vm, njs_value_t *args,
     context = vm->top_frame->function->context;
 
     if (context->already_called) {
-        njs_value_assign(retval, &njs_value_undefined);
+        njs_vm_retval_set(vm, &njs_value_undefined);
         return NJS_OK;
     }
 
@@ -1369,10 +1453,10 @@ njs_promise_all_resolve_element_functions(njs_vm_t *vm, njs_value_t *args,
         return njs_function_call(vm,
                                  njs_function(&context->capability->resolve),
                                  &njs_value_undefined, &arr_value, 1,
-                                 retval);
+                                 &vm->retval);
     }
 
-    njs_value_assign(retval, &njs_value_undefined);
+    njs_vm_retval_set(vm, &njs_value_undefined);
 
     return NJS_OK;
 }
@@ -1380,7 +1464,7 @@ njs_promise_all_resolve_element_functions(njs_vm_t *vm, njs_value_t *args,
 
 static njs_int_t
 njs_promise_perform_all_settled_handler(njs_vm_t *vm, njs_iterator_args_t *args,
-    njs_value_t *value, int64_t index, njs_value_t *retval)
+    njs_value_t *value, int64_t index)
 {
     njs_int_t                    ret;
     njs_array_t                  *array;
@@ -1446,7 +1530,7 @@ njs_promise_perform_all_settled_handler(njs_vm_t *vm, njs_iterator_args_t *args,
     njs_set_function(&arguments[0], on_fulfilled);
     njs_set_function(&arguments[1], on_rejected);
 
-    ret = njs_promise_invoke_then(vm, &next, arguments, 2, retval);
+    ret = njs_promise_invoke_then(vm, &next, arguments, 2);
     if (njs_slow_path(ret == NJS_ERROR)) {
         return ret;
     }
@@ -1457,20 +1541,24 @@ njs_promise_perform_all_settled_handler(njs_vm_t *vm, njs_iterator_args_t *args,
 
 static njs_int_t
 njs_promise_all_settled_element_functions(njs_vm_t *vm,
-    njs_value_t *args, njs_uint_t nargs, njs_index_t rejected,
-    njs_value_t *retval)
+    njs_value_t *args, njs_uint_t nargs, njs_index_t rejected)
 {
     njs_int_t                  ret;
-    uint32_t                   set_atom_id;
-    njs_value_t                status;
     njs_value_t                obj_value, arr_value;
     njs_object_t               *obj;
+    const njs_value_t          *status, *set;
     njs_promise_all_context_t  *context;
+
+    static const njs_value_t  string_status = njs_string("status");
+    static const njs_value_t  string_fulfilled = njs_string("fulfilled");
+    static const njs_value_t  string_value = njs_string("value");
+    static const njs_value_t  string_rejected = njs_string("rejected");
+    static const njs_value_t  string_reason = njs_string("reason");
 
     context = vm->top_frame->function->context;
 
     if (context->already_called) {
-        njs_value_assign(retval, &njs_value_undefined);
+        njs_vm_retval_set(vm, &njs_value_undefined);
         return NJS_OK;
     }
 
@@ -1484,21 +1572,21 @@ njs_promise_all_settled_element_functions(njs_vm_t *vm,
     njs_set_object(&obj_value, obj);
 
     if (rejected) {
-        njs_atom_to_value(vm, &status, NJS_ATOM_STRING_rejected);
-        set_atom_id = NJS_ATOM_STRING_reason;
+        status = &string_rejected;
+        set = &string_reason;
 
     } else {
-        njs_atom_to_value(vm, &status, NJS_ATOM_STRING_fulfilled);
-        set_atom_id = NJS_ATOM_STRING_value;
+        status = &string_fulfilled;
+        set = &string_value;
     }
 
-    ret = njs_value_property_set(vm, &obj_value, NJS_ATOM_STRING_status,
-                                 njs_value_arg(&status));
+    ret = njs_value_property_set(vm, &obj_value, njs_value_arg(&string_status),
+                                 njs_value_arg(status));
     if (njs_slow_path(ret == NJS_ERROR)) {
         return ret;
     }
 
-    ret = njs_value_property_set(vm, &obj_value, set_atom_id,
+    ret = njs_value_property_set(vm, &obj_value, njs_value_arg(set),
                                  njs_arg(args, nargs, 1));
     if (njs_slow_path(ret == NJS_ERROR)) {
         return ret;
@@ -1518,10 +1606,10 @@ njs_promise_all_settled_element_functions(njs_vm_t *vm,
         return njs_function_call(vm,
                                  njs_function(&context->capability->resolve),
                                  &njs_value_undefined, &arr_value, 1,
-                                 retval);
+                                 &vm->retval);
     }
 
-    njs_value_assign(retval, &njs_value_undefined);
+    njs_vm_retval_set(vm, &njs_value_undefined);
 
     return NJS_OK;
 }
@@ -1529,7 +1617,7 @@ njs_promise_all_settled_element_functions(njs_vm_t *vm,
 
 static njs_int_t
 njs_promise_perform_any_handler(njs_vm_t *vm, njs_iterator_args_t *args,
-    njs_value_t *value, int64_t index, njs_value_t *retval)
+    njs_value_t *value, int64_t index)
 {
     njs_int_t                    ret;
     njs_array_t                  *array;
@@ -1584,7 +1672,7 @@ njs_promise_perform_any_handler(njs_vm_t *vm, njs_iterator_args_t *args,
     arguments[0] = capability->resolve;
     njs_set_function(&arguments[1], on_rejected);
 
-    ret = njs_promise_invoke_then(vm, &next, arguments, 2, retval);
+    ret = njs_promise_invoke_then(vm, &next, arguments, 2);
     if (njs_slow_path(ret == NJS_ERROR)) {
         return ret;
     }
@@ -1595,17 +1683,17 @@ njs_promise_perform_any_handler(njs_vm_t *vm, njs_iterator_args_t *args,
 
 static njs_int_t
 njs_promise_any_reject_element_functions(njs_vm_t *vm, njs_value_t *args,
-    njs_uint_t nargs, njs_index_t unused, njs_value_t *retval)
+    njs_uint_t nargs, njs_index_t unused)
 {
     njs_int_t                  ret;
-    njs_value_t                argument, message, arr_value;
+    njs_value_t                argument, arr_value;
     njs_object_t               *error;
     njs_promise_all_context_t  *context;
 
     context = vm->top_frame->function->context;
 
     if (context->already_called) {
-        njs_value_assign(retval, &njs_value_undefined);
+        njs_vm_retval_set(vm, &njs_value_undefined);
         return NJS_OK;
     }
 
@@ -1622,12 +1710,8 @@ njs_promise_any_reject_element_functions(njs_vm_t *vm, njs_value_t *args,
     if (--(*context->remaining_elements) == 0) {
         njs_mp_free(vm->mem_pool, context->remaining_elements);
 
-        njs_atom_to_value(vm, &message,
-                          NJS_ATOM_STRING_All_promises_were_rejected);
-
-        error = njs_error_alloc(vm,
-                                njs_vm_proto(vm, NJS_OBJ_TYPE_AGGREGATE_ERROR),
-                                NULL, &message, &arr_value);
+        error = njs_error_alloc(vm, NJS_OBJ_TYPE_AGGREGATE_ERROR,
+                                NULL, &string_any_rejected, &arr_value);
         if (njs_slow_path(error == NULL)) {
             return NJS_ERROR;
         }
@@ -1636,10 +1720,10 @@ njs_promise_any_reject_element_functions(njs_vm_t *vm, njs_value_t *args,
 
         return njs_function_call(vm, njs_function(&context->capability->reject),
                                  &njs_value_undefined, &argument, 1,
-                                 retval);
+                                 &vm->retval);
     }
 
-    njs_value_assign(retval, &njs_value_undefined);
+    njs_vm_retval_set(vm, &njs_value_undefined);
 
     return NJS_OK;
 }
@@ -1647,7 +1731,7 @@ njs_promise_any_reject_element_functions(njs_vm_t *vm, njs_value_t *args,
 
 static njs_int_t
 njs_promise_race(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+    njs_index_t unused)
 {
     int64_t                      length;
     njs_int_t                    ret;
@@ -1662,7 +1746,7 @@ njs_promise_race(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
         return NJS_ERROR;
     }
 
-    ret = njs_value_property(vm, promise_ctor, NJS_ATOM_STRING_resolve,
+    ret = njs_value_property(vm, promise_ctor, njs_value_arg(&string_resolve),
                              &resolve);
     if (njs_slow_path(ret == NJS_ERROR)) {
         return ret;
@@ -1683,16 +1767,15 @@ njs_promise_race(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
     pargs.function = njs_function(&resolve);
     pargs.constructor = promise_ctor;
 
-    njs_value_assign(&pargs.args.value, iterator);
+    pargs.args.value = iterator;
     pargs.args.to = length;
 
-    ret = njs_object_iterate(vm, &pargs.args, njs_promise_perform_race_handler,
-                             retval);
+    ret = njs_object_iterate(vm, &pargs.args, njs_promise_perform_race_handler);
     if (njs_slow_path(ret == NJS_ERROR)) {
         return ret;
     }
 
-    njs_value_assign(retval, &pargs.capability->promise);
+    vm->retval = pargs.capability->promise;
 
     return NJS_OK;
 }
@@ -1700,7 +1783,7 @@ njs_promise_race(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
 
 static njs_int_t
 njs_promise_perform_race_handler(njs_vm_t *vm, njs_iterator_args_t *args,
-    njs_value_t *value, int64_t index, njs_value_t *retval)
+    njs_value_t *value, int64_t index)
 {
     njs_int_t                    ret;
     njs_value_t                  arguments[2], next;
@@ -1724,7 +1807,7 @@ njs_promise_perform_race_handler(njs_vm_t *vm, njs_iterator_args_t *args,
     arguments[0] = capability->resolve;
     arguments[1] = capability->reject;
 
-    (void) njs_promise_invoke_then(vm, &next, arguments, 2, retval);
+    (void) njs_promise_invoke_then(vm, &next, arguments, 2);
 
     return NJS_OK;
 }
@@ -1732,40 +1815,42 @@ njs_promise_perform_race_handler(njs_vm_t *vm, njs_iterator_args_t *args,
 
 static njs_int_t
 njs_promise_species(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+    njs_index_t unused)
 {
-    njs_value_assign(retval, njs_argument(args, 0));
+    njs_vm_retval_set(vm, njs_argument(args, 0));
 
     return NJS_OK;
 }
 
 
-static const njs_object_prop_init_t  njs_promise_constructor_properties[] =
+static const njs_object_prop_t  njs_promise_constructor_properties[] =
 {
-    NJS_DECLARE_PROP_LENGTH(1),
-
     NJS_DECLARE_PROP_NAME("Promise"),
 
-    NJS_DECLARE_PROP_HANDLER(STRING_prototype, njs_object_prototype_create,
-                             0, 0),
+    NJS_DECLARE_PROP_LENGTH(1),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_resolve, njs_promise_object_resolve, 1,
-                            0),
+    NJS_DECLARE_PROP_HANDLER("prototype", njs_object_prototype_create, 0, 0, 0),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_reject, njs_promise_object_reject, 1, 0),
+    NJS_DECLARE_PROP_NATIVE("resolve", njs_promise_object_resolve, 1, 0),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_all, njs_promise_all, 1,
-                            NJS_PROMISE_ALL),
+    NJS_DECLARE_PROP_NATIVE("reject", njs_promise_object_reject, 1, 0),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_allSettled, njs_promise_all, 1,
+    NJS_DECLARE_PROP_NATIVE("all", njs_promise_all, 1, NJS_PROMISE_ALL),
+
+    NJS_DECLARE_PROP_NATIVE("allSettled", njs_promise_all, 1,
                              NJS_PROMISE_ALL_SETTLED),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_any, njs_promise_all, 1,
-                            NJS_PROMISE_ANY),
+    NJS_DECLARE_PROP_NATIVE("any", njs_promise_all, 1, NJS_PROMISE_ANY),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_race, njs_promise_race, 1, 0),
+    NJS_DECLARE_PROP_NATIVE("race", njs_promise_race, 1, 0),
 
-    NJS_DECLARE_PROP_GETTER(SYMBOL_species, njs_promise_species, 0),
+    {
+        .type = NJS_ACCESSOR,
+        .name = njs_wellknown_symbol(NJS_SYMBOL_SPECIES),
+        .u.accessor = njs_getter(njs_promise_species, 0),
+        .writable = NJS_ATTRIBUTE_UNSET,
+        .configurable = 1,
+    },
 };
 
 
@@ -1775,22 +1860,24 @@ const njs_object_init_t  njs_promise_constructor_init = {
 };
 
 
-static const njs_object_prop_init_t  njs_promise_prototype_properties[] =
+static const njs_object_prop_t  njs_promise_prototype_properties[] =
 {
-    NJS_DECLARE_PROP_HANDLER(STRING_constructor,
-                             njs_object_prototype_create_constructor, 0,
-                             NJS_OBJECT_PROP_VALUE_CW),
+    NJS_DECLARE_PROP_HANDLER("constructor",
+                             njs_object_prototype_create_constructor,
+                             0, 0, NJS_OBJECT_PROP_VALUE_CW),
 
-    NJS_DECLARE_PROP_VALUE(SYMBOL_toStringTag, njs_ascii_strval("Promise"),
-                           NJS_OBJECT_PROP_VALUE_C),
+    {
+        .type = NJS_PROPERTY,
+        .name = njs_wellknown_symbol(NJS_SYMBOL_TO_STRING_TAG),
+        .u.value = njs_string("Promise"),
+        .configurable = 1,
+    },
 
-    NJS_DECLARE_PROP_NATIVE(STRING_then, njs_promise_prototype_then, 2, 0),
+    NJS_DECLARE_PROP_NATIVE("then", njs_promise_prototype_then, 2, 0),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_catch, njs_promise_prototype_catch, 1,
-                            0),
+    NJS_DECLARE_PROP_NATIVE("catch", njs_promise_prototype_catch, 1, 0),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_finally, njs_promise_prototype_finally,
-                            1, 0),
+    NJS_DECLARE_PROP_NATIVE("finally", njs_promise_prototype_finally, 1, 0),
 };
 
 

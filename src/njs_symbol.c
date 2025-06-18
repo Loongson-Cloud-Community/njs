@@ -8,9 +8,63 @@
 #include <njs_main.h>
 
 
+static const njs_value_t  njs_symbol_async_iterator_name =
+                            njs_long_string("Symbol.asyncIterator");
+static const njs_value_t  njs_symbol_has_instance_name =
+                            njs_long_string("Symbol.hasInstance");
+static const njs_value_t  njs_symbol_is_concat_spreadable_name =
+                            njs_long_string("Symbol.isConcatSpreadable");
+static const njs_value_t  njs_symbol_iterator_name =
+                            njs_long_string("Symbol.iterator");
+static const njs_value_t  njs_symbol_match_name =
+                            njs_string("Symbol.match");
+static const njs_value_t  njs_symbol_match_all_name =
+                            njs_long_string("Symbol.matchAll");
+static const njs_value_t  njs_symbol_replace_name =
+                            njs_string("Symbol.replace");
+static const njs_value_t  njs_symbol_search_name =
+                            njs_string("Symbol.search");
+static const njs_value_t  njs_symbol_species_name =
+                            njs_string("Symbol.species");
+static const njs_value_t  njs_symbol_split_name =
+                            njs_string("Symbol.split");
+static const njs_value_t  njs_symbol_to_primitive_name =
+                            njs_long_string("Symbol.toPrimitive");
+static const njs_value_t  njs_symbol_to_string_tag_name =
+                            njs_long_string("Symbol.toStringTag");
+static const njs_value_t  njs_symbol_unscopables_name =
+                            njs_long_string("Symbol.unscopables");
+
+
+static const njs_value_t  *njs_symbol_names[NJS_SYMBOL_KNOWN_MAX] = {
+    &njs_string_invalid,
+    &njs_symbol_async_iterator_name,
+    &njs_symbol_has_instance_name,
+    &njs_symbol_is_concat_spreadable_name,
+    &njs_symbol_iterator_name,
+    &njs_symbol_match_name,
+    &njs_symbol_match_all_name,
+    &njs_symbol_replace_name,
+    &njs_symbol_search_name,
+    &njs_symbol_species_name,
+    &njs_symbol_split_name,
+    &njs_symbol_to_primitive_name,
+    &njs_symbol_to_string_tag_name,
+    &njs_symbol_unscopables_name,
+};
+
+
 const njs_value_t *
 njs_symbol_description(const njs_value_t *value)
 {
+    uint32_t  key;
+
+    key = njs_symbol_key(value);
+
+    if (key < NJS_SYMBOL_KNOWN_MAX) {
+        return njs_symbol_names[key];
+    }
+
     return value->data.u.value != NULL ? value->data.u.value
                                        : &njs_value_undefined;
 }
@@ -26,14 +80,11 @@ njs_symbol_descriptive_string(njs_vm_t *vm, njs_value_t *dst,
 
     description = njs_symbol_description(value);
 
-    if (!njs_is_undefined(description)) {
-        (void) njs_string_prop(vm, &string, description);
-
-    } else {
-        string.start = (u_char *) "";
-        string.size = 0;
-        string.length = 0;
+    if (njs_is_undefined(description)) {
+        description = &njs_string_empty;
     }
+
+    (void) njs_string_prop(&string, description);
 
     string.length += njs_length("Symbol()");
 
@@ -52,8 +103,9 @@ njs_symbol_descriptive_string(njs_vm_t *vm, njs_value_t *dst,
 
 static njs_int_t
 njs_symbol_constructor(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+    njs_index_t unused)
 {
+    uint64_t     key;
     njs_int_t    ret;
     njs_value_t  *value, *name;
 
@@ -73,6 +125,13 @@ njs_symbol_constructor(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
         }
     }
 
+    key = ++vm->symbol_generator;
+
+    if (njs_slow_path(key >= UINT32_MAX)) {
+        njs_internal_error(vm, "Symbol generator overflow");
+        return NJS_ERROR;
+    }
+
     name = njs_mp_alloc(vm->mem_pool, sizeof(njs_value_t));
     if (njs_slow_path(name == NULL)) {
         njs_memory_error(vm);
@@ -80,12 +139,7 @@ njs_symbol_constructor(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
     }
 
     njs_value_assign(name, value);
-    njs_set_symbol(retval, 0, name);
-
-    ret = njs_atom_symbol_add(vm, retval);
-    if (ret != NJS_OK) {
-        return NJS_ERROR;
-    }
+    njs_set_symbol(&vm->retval, key, name);
 
     return NJS_OK;
 }
@@ -93,8 +147,9 @@ njs_symbol_constructor(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
 
 static njs_int_t
 njs_symbol_for(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+    njs_index_t unused)
 {
+    uint64_t              key;
     njs_int_t             ret;
     njs_value_t           *value, lvalue;
     njs_rbtree_node_t     *rb_node;
@@ -116,13 +171,20 @@ njs_symbol_for(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
         node = (njs_rb_symbol_node_t *) rb_node;
 
         if (njs_is_string(&node->name)
-            && njs_string_cmp(vm, value, &node->name) == 0)
+            && njs_string_cmp(value, &node->name) == 0)
         {
-            njs_set_symbol(retval, node->key, &node->name);
+            njs_set_symbol(&vm->retval, node->key, &node->name);
             return NJS_OK;
         }
 
         rb_node = njs_rbtree_node_successor(&vm->global_symbols, rb_node);
+    }
+
+    key = ++vm->symbol_generator;
+
+    if (njs_slow_path(key >= UINT32_MAX)) {
+        njs_internal_error(vm, "Symbol generator overflow");
+        return NJS_ERROR;
     }
 
     node = njs_mp_alloc(vm->mem_pool, sizeof(njs_rb_symbol_node_t));
@@ -131,17 +193,12 @@ njs_symbol_for(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
         return NJS_ERROR;
     }
 
+    node->key = key;
     njs_value_assign(&node->name, value);
-    njs_set_symbol(retval, 0, &node->name);
-
-    ret = njs_atom_symbol_add(vm, retval);
-    if (ret != NJS_OK) {
-        return NJS_ERROR;
-    }
-
-    node->key = retval->atom_id;
 
     njs_rbtree_insert(&vm->global_symbols, &node->node);
+
+    njs_set_symbol(&vm->retval, key, &node->name);
 
     return NJS_OK;
 }
@@ -149,7 +206,7 @@ njs_symbol_for(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
 
 static njs_int_t
 njs_symbol_key_for(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+    njs_index_t unused)
 {
     njs_value_t           *value;
     njs_rb_symbol_node_t  query, *node;
@@ -165,67 +222,63 @@ njs_symbol_key_for(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
     node = (njs_rb_symbol_node_t *) njs_rbtree_find(&vm->global_symbols,
                                                     &query.node);
 
-    njs_value_assign(retval,
+    njs_value_assign(&vm->retval,
                      node != NULL ? &node->name : &njs_value_undefined);
 
     return NJS_OK;
 }
 
 
-static const njs_object_prop_init_t  njs_symbol_constructor_properties[] =
+static const njs_object_prop_t  njs_symbol_constructor_properties[] =
 {
-    NJS_DECLARE_PROP_LENGTH(0),
-
     NJS_DECLARE_PROP_NAME("Symbol"),
 
-    NJS_DECLARE_PROP_HANDLER(STRING_prototype, njs_object_prototype_create,
-                             0, 0),
+    NJS_DECLARE_PROP_LENGTH(0),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_for, njs_symbol_for, 1, 0),
+    NJS_DECLARE_PROP_HANDLER("prototype", njs_object_prototype_create, 0, 0, 0),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_keyFor, njs_symbol_key_for, 1, 0),
+    NJS_DECLARE_PROP_NATIVE("for", njs_symbol_for, 1, 0),
 
-    NJS_DECLARE_PROP_VALUE(STRING_asyncIterator,
-                           njs_symval(asyncIterator, "Symbol.asyncIterator"),
-                           0),
+    NJS_DECLARE_PROP_NATIVE("keyFor", njs_symbol_key_for, 1, 0),
 
-    NJS_DECLARE_PROP_VALUE(STRING_hasInstance,
-                           njs_symval(hasInstance, "Symbol.hasInstance"),
-                           0),
+    NJS_DECLARE_PROP_VALUE("asyncIterator",
+                           njs_wellknown_symbol(NJS_SYMBOL_ASYNC_ITERATOR), 0),
 
-    NJS_DECLARE_PROP_VALUE(STRING_isConcatSpreadable,
-                   njs_symval(isConcatSpreadable, "Symbol.isConcatSpreadable"),
-                   0),
+    NJS_DECLARE_PROP_VALUE("hasInstance",
+                           njs_wellknown_symbol(NJS_SYMBOL_HAS_INSTANCE), 0),
 
-    NJS_DECLARE_PROP_VALUE(STRING_iterator,
-                           njs_symval(iterator, "Symbol.iterator"), 0),
+    NJS_DECLARE_PROP_LVALUE("isConcatSpreadable",
+                     njs_wellknown_symbol(NJS_SYMBOL_IS_CONCAT_SPREADABLE), 0),
 
-    NJS_DECLARE_PROP_VALUE(STRING_match, njs_symval(match, "Symbol.match"), 0),
+    NJS_DECLARE_PROP_VALUE("iterator",
+                           njs_wellknown_symbol(NJS_SYMBOL_ITERATOR), 0),
 
-    NJS_DECLARE_PROP_VALUE(STRING_matchAll,
-                           njs_symval(matchAll, "Symbol.matchAll"), 0),
+    NJS_DECLARE_PROP_VALUE("match",
+                           njs_wellknown_symbol(NJS_SYMBOL_MATCH), 0),
 
-    NJS_DECLARE_PROP_VALUE(STRING_replace,
-                           njs_symval(replace, "Symbol.replace"), 0),
+    NJS_DECLARE_PROP_VALUE("matchAll",
+                           njs_wellknown_symbol(NJS_SYMBOL_MATCH_ALL), 0),
 
-    NJS_DECLARE_PROP_VALUE(STRING_search,
-                           njs_symval(search, "Symbol.search"), 0),
+    NJS_DECLARE_PROP_VALUE("replace",
+                           njs_wellknown_symbol(NJS_SYMBOL_REPLACE), 0),
 
-    NJS_DECLARE_PROP_VALUE(STRING_species,
-                           njs_symval(species, "Symbol.species"), 0),
+    NJS_DECLARE_PROP_VALUE("search",
+                           njs_wellknown_symbol(NJS_SYMBOL_SEARCH), 0),
 
-    NJS_DECLARE_PROP_VALUE(STRING_split, njs_symval(split, "Symbol.split"), 0),
+    NJS_DECLARE_PROP_VALUE("species",
+                           njs_wellknown_symbol(NJS_SYMBOL_SPECIES), 0),
 
-    NJS_DECLARE_PROP_VALUE(STRING_toPrimitive,
-                           njs_symval(toPrimitive, "Symbol.toPrimitive"),
-                           0),
+    NJS_DECLARE_PROP_VALUE("split",
+                           njs_wellknown_symbol(NJS_SYMBOL_SPLIT), 0),
 
-    NJS_DECLARE_PROP_VALUE(STRING_toStringTag,
-                           njs_symval(toStringTag, "Symbol.toStringTag"), 0),
+    NJS_DECLARE_PROP_VALUE("toPrimitive",
+                           njs_wellknown_symbol(NJS_SYMBOL_TO_PRIMITIVE), 0),
 
-    NJS_DECLARE_PROP_VALUE(STRING_unscopables,
-                           njs_symval(unscopables, "Symbol.unscopables"),
-                           0),
+    NJS_DECLARE_PROP_VALUE("toStringTag",
+                           njs_wellknown_symbol(NJS_SYMBOL_TO_STRING_TAG), 0),
+
+    NJS_DECLARE_PROP_VALUE("unscopables",
+                           njs_wellknown_symbol(NJS_SYMBOL_UNSCOPABLES), 0),
 };
 
 
@@ -237,7 +290,7 @@ const njs_object_init_t  njs_symbol_constructor_init = {
 
 static njs_int_t
 njs_symbol_prototype_value_of(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+    njs_index_t unused)
 {
     njs_value_t  *value;
 
@@ -256,7 +309,7 @@ njs_symbol_prototype_value_of(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
         }
     }
 
-    njs_value_assign(retval, value);
+    vm->retval = *value;
 
     return NJS_OK;
 }
@@ -264,57 +317,57 @@ njs_symbol_prototype_value_of(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
 
 static njs_int_t
 njs_symbol_prototype_to_string(njs_vm_t *vm, njs_value_t *args,
-    njs_uint_t nargs, njs_index_t unused, njs_value_t *retval)
+    njs_uint_t nargs, njs_index_t unused)
 {
     njs_int_t  ret;
 
-    ret = njs_symbol_prototype_value_of(vm, args, nargs, unused, retval);
+    ret = njs_symbol_prototype_value_of(vm, args, nargs, unused);
     if (njs_slow_path(ret != NJS_OK)) {
         return ret;
     }
 
-    return njs_symbol_descriptive_string(vm, retval, retval);
+    return njs_symbol_descriptive_string(vm, &vm->retval, &vm->retval);
 }
 
 
 static njs_int_t
 njs_symbol_prototype_description(njs_vm_t *vm, njs_value_t *args,
-    njs_uint_t nargs, njs_index_t unused, njs_value_t *retval)
+    njs_uint_t nargs, njs_index_t unused)
 {
     njs_int_t  ret;
 
-    ret = njs_symbol_prototype_value_of(vm, args, nargs, unused, retval);
+    ret = njs_symbol_prototype_value_of(vm, args, nargs, unused);
     if (njs_slow_path(ret != NJS_OK)) {
         return ret;
     }
 
-    njs_value_assign(retval, njs_symbol_description(retval));
+    njs_value_assign(&vm->retval, njs_symbol_description(&vm->retval));
 
     return NJS_OK;
 }
 
 
-static const njs_object_prop_init_t  njs_symbol_prototype_properties[] =
+static const njs_object_prop_t  njs_symbol_prototype_properties[] =
 {
-    NJS_DECLARE_PROP_VALUE(SYMBOL_toStringTag, njs_ascii_strval("Symbol"),
-                           NJS_OBJECT_PROP_VALUE_C),
+    {
+        .type = NJS_PROPERTY,
+        .name = njs_wellknown_symbol(NJS_SYMBOL_TO_STRING_TAG),
+        .u.value = njs_string("Symbol"),
+        .configurable = 1,
+    },
 
-    NJS_DECLARE_PROP_HANDLER(STRING___proto__,
-                             njs_primitive_prototype_get_proto, 0,
-                             NJS_OBJECT_PROP_VALUE_CW),
+    NJS_DECLARE_PROP_HANDLER("__proto__", njs_primitive_prototype_get_proto,
+                             0, 0, NJS_OBJECT_PROP_VALUE_CW),
 
-    NJS_DECLARE_PROP_HANDLER(STRING_constructor,
-                             njs_object_prototype_create_constructor, 0,
-                             NJS_OBJECT_PROP_VALUE_CW),
+    NJS_DECLARE_PROP_HANDLER("constructor",
+                             njs_object_prototype_create_constructor,
+                             0, 0, NJS_OBJECT_PROP_VALUE_CW),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_valueOf, njs_symbol_prototype_value_of,
-                            0, 0),
+    NJS_DECLARE_PROP_NATIVE("valueOf", njs_symbol_prototype_value_of, 0, 0),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_toString,
-                            njs_symbol_prototype_to_string, 0, 0),
+    NJS_DECLARE_PROP_NATIVE("toString", njs_symbol_prototype_to_string, 0, 0),
 
-    NJS_DECLARE_PROP_GETTER(STRING_description,
-                            njs_symbol_prototype_description, 0),
+    NJS_DECLARE_PROP_GETTER("description", njs_symbol_prototype_description, 0),
 };
 
 

@@ -41,12 +41,12 @@ interface  RsaHashedKeyGenParams {
 }
 
 interface  EcKeyImportParams {
-    name: "ECDSA" | "ECDH";
+    name: "ECDSA";
     namedCurve: "P-256" | "P-384" | "P-521";
 }
 
 interface EcKeyGenParams {
-    name: "ECDSA" | "ECDH";
+    name: "ECDSA";
     namedCurve: "P-256" | "P-384" | "P-521";
 }
 
@@ -68,8 +68,7 @@ type ImportAlgorithm =
     | AesImportParams
     | AesVariants
     | "PBKDF2"
-    | "HKDF"
-    | "ECDH";
+    | "HKDF";
 
 type GenerateAlgorithm =
     | RsaHashedKeyGenParams
@@ -100,15 +99,9 @@ interface   Pbkdf2Params {
     interations: number;
 }
 
-interface   EcdhParams {
-    name: "ECDH";
-    public: CryptoKey;
-}
-
 type DeriveAlgorithm =
     | HkdfParams
-    | Pbkdf2Params
-    | EcdhParams;
+    | Pbkdf2Params;
 
 interface   HmacKeyGenParams {
     name: "HMAC";
@@ -143,35 +136,6 @@ type SignOrVerifyAlgorithm =
     | "RSASSA-PKCS1-v1_5";
 
 interface CryptoKey {
-    /*
-     * An object describing the algorithm for which this key can be used
-     * and any associated extra parameters.
-     * @since 0.8.0
-     */
-    readonly algorithm: GenerateAlgorithm;
-    /*
-     * A boolean value that is true if the key can be exported and false if not.
-     * @since 0.8.0
-     */
-    readonly extractable: boolean;
-    /*
-     * A string value indicates which kind of key is represented by the object.
-     *
-     * It can have the following values:
-     *  "secret": This key is a secret key for use with a symmetric algorithm.
-     *  "private": This key is the private half of an asymmetric algorithm's CryptoKeyPair.
-     *  "public": This key is the public half of an asymmetric algorithm's CryptoKeyPair.
-     * @since 0.8.0
-     */
-    readonly type: string;
-
-    /*
-     * An array of strings indicating what this key can be used for.
-     * Possible array values: "encrypt", "decrypt", "sign", "verify",
-     *  "deriveKey", "deriveBits", "wrapKey", "unwrapKey".
-     * @since 0.8.0
-     */
-    readonly usages: Array<string>;
 }
 
 type CryptoKeyPair = { privateKey: CryptoKey, publicKey: CryptoKey };
@@ -269,7 +233,8 @@ interface SubtleCrypto {
               key: CryptoKey): Promise<ArrayBuffer|Object>;
 
     /**
-     * Generates a key for symmetric algorithms.
+     * Generates a key for symmetric algorithms or a keypair
+     *  for asymmetric algorithms.
      *
      * @since 0.7.10
      * @param algorithm Dictionary object defining the type of key to generate
@@ -279,24 +244,9 @@ interface SubtleCrypto {
      *  Possible array values: "encrypt", "decrypt", "sign", "verify",
      *  "deriveKey", "deriveBits", "wrapKey", "unwrapKey".
      */
-    generateKey(algorithm: HmacKeyGenParams | AesKeyGenParams,
+    generateKey(algorithm: GenerateAlgorithm,
                 extractable: boolean,
-                usage: Array<string>): Promise<CryptoKey>;
-
-    /**
-     * Generates a key for asymmetric algorithms.
-     *
-     * @since 0.7.10
-     * @param algorithm Dictionary object defining the type of key to generate
-     *  and providing extra algorithm-specific parameters.
-     * @param extractable Boolean indicating whether a key can be exported.
-     * @param usage Array indicating what can be done with the key.
-     *  Possible array values: "encrypt", "decrypt", "sign", "verify",
-     *  "deriveKey", "deriveBits", "wrapKey", "unwrapKey".
-     */
-    generateKey(algorithm: RsaHashedKeyGenParams | EcKeyGenParams,
-                extractable: boolean,
-                usage: Array<string>): Promise<CryptoKeyPair>;
+                usage: Array<string>): Promise<CryptoKey|CryptoKeyPair>;
 
     /**
      * Generates a digital signature.

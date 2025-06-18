@@ -5,9 +5,7 @@
  */
 
 
-#include <njs.h>
-#include <njs_assert.h>
-#include <njs_string.h>
+#include <njs_main.h>
 #include "njs_openssl.h"
 
 typedef enum {
@@ -28,6 +26,7 @@ typedef enum {
     NJS_KEY_USAGE_SIGN          = 1 << 6,
     NJS_KEY_USAGE_VERIFY        = 1 << 7,
     NJS_KEY_USAGE_WRAP_KEY      = 1 << 8,
+    NJS_KEY_USAGE_UNSUPPORTED   = 1 << 9,
     NJS_KEY_USAGE_UNWRAP_KEY    = 1 << 10,
 } njs_webcrypto_key_usage_t;
 
@@ -44,7 +43,6 @@ typedef enum {
     NJS_ALGORITHM_ECDH,
     NJS_ALGORITHM_PBKDF2,
     NJS_ALGORITHM_HKDF,
-    NJS_ALGORITHM_MAX,
 } njs_webcrypto_alg_t;
 
 
@@ -54,7 +52,6 @@ typedef enum {
     NJS_HASH_SHA256,
     NJS_HASH_SHA384,
     NJS_HASH_SHA512,
-    NJS_HASH_MAX,
 } njs_webcrypto_hash_t;
 
 
@@ -68,28 +65,20 @@ typedef struct {
     njs_webcrypto_alg_t        type;
     unsigned                   usage;
     unsigned                   fmt;
-    unsigned                   raw;
 } njs_webcrypto_algorithm_t;
 
 
 typedef struct {
     njs_webcrypto_algorithm_t  *alg;
+    njs_webcrypto_hash_t       hash;
+    int                        curve;
+
+    EVP_PKEY                   *pkey;
+    njs_str_t                  raw;
+
     unsigned                   usage;
     njs_bool_t                 extractable;
-
-    njs_webcrypto_hash_t       hash;
-
-    union {
-        struct {
-            EVP_PKEY          *pkey;
-            njs_bool_t        privat;
-            int               curve;
-        } a;
-        struct {
-            njs_str_t         raw;
-        } s;
-    } u;
-
+    njs_bool_t                 privat;
 } njs_webcrypto_key_t;
 
 
@@ -99,48 +88,33 @@ typedef int (*EVP_PKEY_cipher_t)(EVP_PKEY_CTX *ctx, unsigned char *out,
 
 
 static njs_int_t njs_ext_cipher(njs_vm_t *vm, njs_value_t *args,
-    njs_uint_t nargs, njs_index_t unused, njs_value_t *retval);
+    njs_uint_t nargs, njs_index_t unused);
 static njs_int_t njs_cipher_pkey(njs_vm_t *vm, njs_str_t *data,
-    njs_webcrypto_key_t *key, njs_index_t encrypt, njs_value_t *retval);
+    njs_webcrypto_key_t *key, njs_index_t encrypt);
 static njs_int_t njs_cipher_aes_gcm(njs_vm_t *vm, njs_str_t *data,
-    njs_webcrypto_key_t *key, njs_value_t *options, njs_bool_t encrypt,
-    njs_value_t *retval);
+    njs_webcrypto_key_t *key, njs_value_t *options, njs_bool_t encrypt);
 static njs_int_t njs_cipher_aes_ctr(njs_vm_t *vm, njs_str_t *data,
-    njs_webcrypto_key_t *key, njs_value_t *options, njs_bool_t encrypt,
-    njs_value_t *retval);
+    njs_webcrypto_key_t *key, njs_value_t *options, njs_bool_t encrypt);
 static njs_int_t njs_cipher_aes_cbc(njs_vm_t *vm, njs_str_t *data,
-    njs_webcrypto_key_t *key, njs_value_t *options, njs_bool_t encrypt,
-    njs_value_t *retval);
+    njs_webcrypto_key_t *key, njs_value_t *options, njs_bool_t encrypt);
 static njs_int_t njs_ext_derive(njs_vm_t *vm, njs_value_t *args,
-    njs_uint_t nargs, njs_index_t derive_key, njs_value_t *retval);
+    njs_uint_t nargs, njs_index_t derive_key);
 static njs_int_t njs_ext_digest(njs_vm_t *vm, njs_value_t *args,
-    njs_uint_t nargs, njs_index_t unused, njs_value_t *retval);
+    njs_uint_t nargs, njs_index_t unused);
 static njs_int_t njs_ext_export_key(njs_vm_t *vm, njs_value_t *args,
-    njs_uint_t nargs, njs_index_t unused, njs_value_t *retval);
+    njs_uint_t nargs, njs_index_t unused);
 static njs_int_t njs_ext_generate_key(njs_vm_t *vm, njs_value_t *args,
-    njs_uint_t nargs, njs_index_t unused, njs_value_t *retval);
+    njs_uint_t nargs, njs_index_t unused);
 static njs_int_t njs_ext_import_key(njs_vm_t *vm, njs_value_t *args,
-    njs_uint_t nargs, njs_index_t unused, njs_value_t *retval);
+    njs_uint_t nargs, njs_index_t unused);
 static njs_int_t njs_ext_sign(njs_vm_t *vm, njs_value_t *args,
-    njs_uint_t nargs, njs_index_t verify, njs_value_t *retval);
+    njs_uint_t nargs, njs_index_t verify);
 static njs_int_t njs_ext_unwrap_key(njs_vm_t *vm, njs_value_t *args,
-    njs_uint_t nargs, njs_index_t unused, njs_value_t *retval);
+    njs_uint_t nargs, njs_index_t unused);
 static njs_int_t njs_ext_wrap_key(njs_vm_t *vm, njs_value_t *args,
-    njs_uint_t nargs, njs_index_t unused, njs_value_t *retval);
-static njs_int_t njs_key_ext_algorithm(njs_vm_t *vm, njs_object_prop_t *prop,
-    uint32_t unused, njs_value_t *value, njs_value_t *setval,
-    njs_value_t *retval);
-static njs_int_t njs_key_ext_extractable(njs_vm_t *vm, njs_object_prop_t *prop,
-    uint32_t unused, njs_value_t *value, njs_value_t *setval,
-    njs_value_t *retval);
-static njs_int_t njs_key_ext_type(njs_vm_t *vm, njs_object_prop_t *prop,
-    uint32_t unused, njs_value_t *value, njs_value_t *setval,
-    njs_value_t *retval);
-static njs_int_t njs_key_ext_usages(njs_vm_t *vm, njs_object_prop_t *prop,
-    uint32_t unused, njs_value_t *value, njs_value_t *setval,
-    njs_value_t *retval);
+    njs_uint_t nargs, njs_index_t unused);
 static njs_int_t njs_ext_get_random_values(njs_vm_t *vm, njs_value_t *args,
-    njs_uint_t nargs, njs_index_t unused, njs_value_t *retval);
+    njs_uint_t nargs, njs_index_t unused);
 
 static njs_webcrypto_key_t *njs_webcrypto_key_alloc(njs_vm_t *vm,
     njs_webcrypto_algorithm_t *alg, unsigned usage, njs_bool_t extractable);
@@ -155,14 +129,12 @@ static njs_webcrypto_algorithm_t *njs_key_algorithm(njs_vm_t *vm,
 static njs_str_t *njs_algorithm_string(njs_webcrypto_algorithm_t *algorithm);
 static njs_int_t njs_algorithm_hash(njs_vm_t *vm, njs_value_t *value,
     njs_webcrypto_hash_t *hash);
-static njs_str_t *njs_algorithm_hash_name(njs_webcrypto_hash_t hash);
 static const EVP_MD *njs_algorithm_hash_digest(njs_webcrypto_hash_t hash);
 static njs_int_t njs_algorithm_curve(njs_vm_t *vm, njs_value_t *value,
     int *curve);
-static njs_str_t *njs_algorithm_curve_name(int curve);
 
-static njs_int_t njs_webcrypto_result(njs_vm_t *vm, njs_opaque_value_t *result,
-    njs_int_t rc, njs_value_t *retval);
+static njs_int_t njs_webcrypto_result(njs_vm_t *vm, njs_value_t *result,
+    njs_int_t rc);
 static njs_int_t njs_webcrypto_array_buffer(njs_vm_t *vm, njs_value_t *retval,
     u_char *start, size_t length);
 static void njs_webcrypto_error(njs_vm_t *vm, const char *fmt, ...);
@@ -171,32 +143,8 @@ static njs_int_t njs_webcrypto_init(njs_vm_t *vm);
 
 static njs_webcrypto_entry_t njs_webcrypto_alg[] = {
 
-#define njs_webcrypto_algorithm(type, usage, fmt, raw)                       \
-    (uintptr_t) & (njs_webcrypto_algorithm_t) { type, usage, fmt, raw }
-
-    {
-      njs_str("RSASSA-PKCS1-v1_5"),
-      njs_webcrypto_algorithm(NJS_ALGORITHM_RSASSA_PKCS1_v1_5,
-                              NJS_KEY_USAGE_SIGN |
-                              NJS_KEY_USAGE_VERIFY |
-                              NJS_KEY_USAGE_GENERATE_KEY,
-                              NJS_KEY_FORMAT_PKCS8 |
-                              NJS_KEY_FORMAT_SPKI |
-                              NJS_KEY_FORMAT_JWK,
-                              0)
-    },
-
-    {
-      njs_str("RSA-PSS"),
-      njs_webcrypto_algorithm(NJS_ALGORITHM_RSA_PSS,
-                              NJS_KEY_USAGE_SIGN |
-                              NJS_KEY_USAGE_VERIFY |
-                              NJS_KEY_USAGE_GENERATE_KEY,
-                              NJS_KEY_FORMAT_PKCS8 |
-                              NJS_KEY_FORMAT_SPKI |
-                              NJS_KEY_FORMAT_JWK,
-                              0)
-    },
+#define njs_webcrypto_algorithm(type, usage_mask, fmt_mask)                  \
+    (uintptr_t) & (njs_webcrypto_algorithm_t) { type, usage_mask, fmt_mask }
 
     {
       njs_str("RSA-OAEP"),
@@ -208,19 +156,7 @@ static njs_webcrypto_entry_t njs_webcrypto_alg[] = {
                               NJS_KEY_USAGE_GENERATE_KEY,
                               NJS_KEY_FORMAT_PKCS8 |
                               NJS_KEY_FORMAT_SPKI |
-                              NJS_KEY_FORMAT_JWK,
-                              0)
-    },
-
-    {
-      njs_str("HMAC"),
-      njs_webcrypto_algorithm(NJS_ALGORITHM_HMAC,
-                              NJS_KEY_USAGE_GENERATE_KEY |
-                              NJS_KEY_USAGE_SIGN |
-                              NJS_KEY_USAGE_VERIFY,
-                              NJS_KEY_FORMAT_RAW |
-                              NJS_KEY_FORMAT_JWK,
-                              1)
+                              NJS_KEY_FORMAT_JWK)
     },
 
     {
@@ -232,8 +168,7 @@ static njs_webcrypto_entry_t njs_webcrypto_alg[] = {
                               NJS_KEY_USAGE_UNWRAP_KEY |
                               NJS_KEY_USAGE_GENERATE_KEY,
                               NJS_KEY_FORMAT_RAW |
-                              NJS_KEY_FORMAT_JWK,
-                              1)
+                              NJS_KEY_FORMAT_JWK)
     },
 
     {
@@ -245,8 +180,7 @@ static njs_webcrypto_entry_t njs_webcrypto_alg[] = {
                               NJS_KEY_USAGE_UNWRAP_KEY |
                               NJS_KEY_USAGE_GENERATE_KEY,
                               NJS_KEY_FORMAT_RAW |
-                              NJS_KEY_FORMAT_JWK,
-                              1)
+                              NJS_KEY_FORMAT_JWK)
     },
 
     {
@@ -258,8 +192,29 @@ static njs_webcrypto_entry_t njs_webcrypto_alg[] = {
                               NJS_KEY_USAGE_UNWRAP_KEY |
                               NJS_KEY_USAGE_GENERATE_KEY,
                               NJS_KEY_FORMAT_RAW |
-                              NJS_KEY_FORMAT_JWK,
-                              1)
+                              NJS_KEY_FORMAT_JWK)
+    },
+
+    {
+      njs_str("RSASSA-PKCS1-v1_5"),
+      njs_webcrypto_algorithm(NJS_ALGORITHM_RSASSA_PKCS1_v1_5,
+                              NJS_KEY_USAGE_SIGN |
+                              NJS_KEY_USAGE_VERIFY |
+                              NJS_KEY_USAGE_GENERATE_KEY,
+                              NJS_KEY_FORMAT_PKCS8 |
+                              NJS_KEY_FORMAT_SPKI |
+                              NJS_KEY_FORMAT_JWK)
+    },
+
+    {
+      njs_str("RSA-PSS"),
+      njs_webcrypto_algorithm(NJS_ALGORITHM_RSA_PSS,
+                              NJS_KEY_USAGE_SIGN |
+                              NJS_KEY_USAGE_VERIFY |
+                              NJS_KEY_USAGE_GENERATE_KEY,
+                              NJS_KEY_FORMAT_PKCS8 |
+                              NJS_KEY_FORMAT_SPKI |
+                              NJS_KEY_FORMAT_JWK)
     },
 
     {
@@ -271,8 +226,7 @@ static njs_webcrypto_entry_t njs_webcrypto_alg[] = {
                               NJS_KEY_FORMAT_PKCS8 |
                               NJS_KEY_FORMAT_SPKI |
                               NJS_KEY_FORMAT_RAW |
-                              NJS_KEY_FORMAT_JWK,
-                              0)
+                              NJS_KEY_FORMAT_JWK)
     },
 
     {
@@ -280,12 +234,9 @@ static njs_webcrypto_entry_t njs_webcrypto_alg[] = {
       njs_webcrypto_algorithm(NJS_ALGORITHM_ECDH,
                               NJS_KEY_USAGE_DERIVE_KEY |
                               NJS_KEY_USAGE_DERIVE_BITS |
-                              NJS_KEY_USAGE_GENERATE_KEY,
-                              NJS_KEY_FORMAT_PKCS8 |
-                              NJS_KEY_FORMAT_SPKI |
-                              NJS_KEY_FORMAT_RAW |
-                              NJS_KEY_FORMAT_JWK,
-                              0)
+                              NJS_KEY_USAGE_GENERATE_KEY |
+                              NJS_KEY_USAGE_UNSUPPORTED,
+                              NJS_KEY_FORMAT_UNKNOWN)
     },
 
     {
@@ -293,8 +244,7 @@ static njs_webcrypto_entry_t njs_webcrypto_alg[] = {
       njs_webcrypto_algorithm(NJS_ALGORITHM_PBKDF2,
                               NJS_KEY_USAGE_DERIVE_KEY |
                               NJS_KEY_USAGE_DERIVE_BITS,
-                              NJS_KEY_FORMAT_RAW,
-                              1)
+                              NJS_KEY_FORMAT_RAW)
     },
 
     {
@@ -302,8 +252,17 @@ static njs_webcrypto_entry_t njs_webcrypto_alg[] = {
       njs_webcrypto_algorithm(NJS_ALGORITHM_HKDF,
                               NJS_KEY_USAGE_DERIVE_KEY |
                               NJS_KEY_USAGE_DERIVE_BITS,
-                              NJS_KEY_FORMAT_RAW,
-                              1)
+                              NJS_KEY_FORMAT_RAW)
+    },
+
+    {
+      njs_str("HMAC"),
+      njs_webcrypto_algorithm(NJS_ALGORITHM_HMAC,
+                              NJS_KEY_USAGE_GENERATE_KEY |
+                              NJS_KEY_USAGE_SIGN |
+                              NJS_KEY_USAGE_VERIFY,
+                              NJS_KEY_FORMAT_RAW |
+                              NJS_KEY_FORMAT_JWK)
     },
 
     {
@@ -370,7 +329,7 @@ static njs_webcrypto_entry_t njs_webcrypto_alg_hash[] = {
 
 
 static njs_str_t
-    njs_webcrypto_alg_name[NJS_ALGORITHM_HMAC + 1][NJS_HASH_MAX] = {
+    njs_webcrypto_alg_name[NJS_ALGORITHM_HMAC + 1][NJS_HASH_SHA512 + 1] = {
     {
         njs_null_str,
         njs_str("RS1"),
@@ -424,6 +383,18 @@ static njs_str_t njs_webcrypto_alg_aes_name[3][3 + 1] = {
         njs_str("A192CBC"),
         njs_str("A256CBC"),
         njs_null_str,
+    },
+};
+
+
+static njs_external_t  njs_ext_webcrypto_crypto_key[] = {
+
+    {
+        .flags = NJS_EXTERN_PROPERTY | NJS_EXTERN_SYMBOL,
+        .name.symbol = NJS_SYMBOL_TO_STRING_TAG,
+        .u.property = {
+            .value = "CryptoKey",
+        }
     },
 };
 
@@ -577,55 +548,6 @@ static njs_external_t  njs_ext_subtle_webcrypto[] = {
 
 };
 
-
-static njs_external_t  njs_ext_webcrypto_crypto_key[] = {
-
-    {
-        .flags = NJS_EXTERN_PROPERTY | NJS_EXTERN_SYMBOL,
-        .name.symbol = NJS_SYMBOL_TO_STRING_TAG,
-        .u.property = {
-            .value = "CryptoKey",
-        }
-    },
-
-    {
-        .flags = NJS_EXTERN_PROPERTY,
-        .name.string = njs_str("algorithm"),
-        .enumerable = 1,
-        .u.property = {
-            .handler = njs_key_ext_algorithm,
-        }
-    },
-
-    {
-        .flags = NJS_EXTERN_PROPERTY,
-        .name.string = njs_str("extractable"),
-        .enumerable = 1,
-        .u.property = {
-            .handler = njs_key_ext_extractable,
-        }
-    },
-
-    {
-        .flags = NJS_EXTERN_PROPERTY,
-        .name.string = njs_str("type"),
-        .enumerable = 1,
-        .u.property = {
-            .handler = njs_key_ext_type,
-        }
-    },
-
-    {
-        .flags = NJS_EXTERN_PROPERTY,
-        .name.string = njs_str("usages"),
-        .enumerable = 1,
-        .u.property = {
-            .handler = njs_key_ext_usages,
-        }
-    },
-};
-
-
 static njs_external_t  njs_ext_webcrypto[] = {
 
     {
@@ -664,32 +586,27 @@ static njs_external_t  njs_ext_webcrypto[] = {
 
 njs_module_t  njs_webcrypto_module = {
     .name = njs_str("webcrypto"),
-    .preinit = NULL,
     .init = njs_webcrypto_init,
 };
 
 
-static const njs_str_t  string_alg = njs_str("alg");
-static const njs_str_t  string_d = njs_str("d");
-static const njs_str_t  string_dp = njs_str("dp");
-static const njs_str_t  string_dq = njs_str("dq");
-static const njs_str_t  string_e = njs_str("e");
-static const njs_str_t  string_k = njs_str("k");
-static const njs_str_t  string_n = njs_str("n");
-static const njs_str_t  string_p = njs_str("p");
-static const njs_str_t  string_q = njs_str("q");
-static const njs_str_t  string_qi = njs_str("qi");
-static const njs_str_t  string_x = njs_str("x");
-static const njs_str_t  string_y = njs_str("y");
-static const njs_str_t  string_ext = njs_str("ext");
-static const njs_str_t  string_crv = njs_str("crv");
-static const njs_str_t  string_kty = njs_str("kty");
-static const njs_str_t  key_ops = njs_str("key_ops");
-static const njs_str_t  string_hash = njs_str("hash");
-static const njs_str_t  string_name = njs_str("name");
-static const njs_str_t  string_length = njs_str("length");
-static const njs_str_t  string_ml = njs_str("modulusLength");
-static const njs_str_t  string_curve = njs_str("namedCurve");
+static const njs_value_t  string_alg = njs_string("alg");
+static const njs_value_t  string_d = njs_string("d");
+static const njs_value_t  string_dp = njs_string("dp");
+static const njs_value_t  string_dq = njs_string("dq");
+static const njs_value_t  string_e = njs_string("e");
+static const njs_value_t  string_k = njs_string("k");
+static const njs_value_t  string_n = njs_string("n");
+static const njs_value_t  string_p = njs_string("p");
+static const njs_value_t  string_q = njs_string("q");
+static const njs_value_t  string_qi = njs_string("qi");
+static const njs_value_t  string_x = njs_string("x");
+static const njs_value_t  string_y = njs_string("y");
+static const njs_value_t  string_ext = njs_string("ext");
+static const njs_value_t  string_crv = njs_string("crv");
+static const njs_value_t  string_kty = njs_string("kty");
+static const njs_value_t  key_ops = njs_string("key_ops");
+static const njs_value_t  string_length = njs_string("length");
 
 
 static njs_int_t    njs_webcrypto_crypto_key_proto_id;
@@ -697,13 +614,12 @@ static njs_int_t    njs_webcrypto_crypto_key_proto_id;
 
 static njs_int_t
 njs_ext_cipher(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t encrypt, njs_value_t *retval)
+    njs_index_t encrypt)
 {
     unsigned                   mask;
     njs_int_t                  ret;
     njs_str_t                  data;
     njs_value_t                *options;
-    njs_opaque_value_t         result;
     njs_webcrypto_key_t        *key;
     njs_webcrypto_algorithm_t  *alg;
 
@@ -716,22 +632,22 @@ njs_ext_cipher(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
     key = njs_vm_external(vm, njs_webcrypto_crypto_key_proto_id,
                           njs_arg(args, nargs, 2));
     if (njs_slow_path(key == NULL)) {
-        njs_vm_type_error(vm, "\"key\" is not a CryptoKey object");
+        njs_type_error(vm, "\"key\" is not a CryptoKey object");
         goto fail;
     }
 
     mask = encrypt ? NJS_KEY_USAGE_ENCRYPT : NJS_KEY_USAGE_DECRYPT;
     if (njs_slow_path(!(key->usage & mask))) {
-        njs_vm_type_error(vm, "provide key does not support %s operation",
-                          encrypt ? "encrypt" : "decrypt");
+        njs_type_error(vm, "provide key does not support %s operation",
+                       encrypt ? "encrypt" : "decrypt");
         goto fail;
     }
 
     if (njs_slow_path(key->alg != alg)) {
-        njs_vm_type_error(vm, "cannot %s using \"%V\" with \"%V\" key",
-                          encrypt ? "encrypt" : "decrypt",
-                          njs_algorithm_string(key->alg),
-                          njs_algorithm_string(alg));
+        njs_type_error(vm, "cannot %s using \"%V\" with \"%V\" key",
+                       encrypt ? "encrypt" : "decrypt",
+                       njs_algorithm_string(key->alg),
+                       njs_algorithm_string(alg));
         goto fail;
     }
 
@@ -742,36 +658,33 @@ njs_ext_cipher(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
 
     switch (alg->type) {
     case NJS_ALGORITHM_RSA_OAEP:
-        ret = njs_cipher_pkey(vm, &data, key, encrypt, njs_value_arg(&result));
+        ret = njs_cipher_pkey(vm, &data, key, encrypt);
         break;
 
     case NJS_ALGORITHM_AES_GCM:
-        ret = njs_cipher_aes_gcm(vm, &data, key, options, encrypt,
-                                 njs_value_arg(&result));
+        ret = njs_cipher_aes_gcm(vm, &data, key, options, encrypt);
         break;
 
     case NJS_ALGORITHM_AES_CTR:
-        ret = njs_cipher_aes_ctr(vm, &data, key, options, encrypt,
-                                 njs_value_arg(&result));
+        ret = njs_cipher_aes_ctr(vm, &data, key, options, encrypt);
         break;
 
     case NJS_ALGORITHM_AES_CBC:
     default:
-        ret = njs_cipher_aes_cbc(vm, &data, key, options, encrypt,
-                                 njs_value_arg(&result));
+        ret = njs_cipher_aes_cbc(vm, &data, key, options, encrypt);
     }
 
-    return njs_webcrypto_result(vm, &result, ret, retval);
+    return njs_webcrypto_result(vm, njs_vm_retval(vm), ret);
 
 fail:
 
-    return njs_webcrypto_result(vm, NULL, NJS_ERROR, retval);
+    return njs_webcrypto_result(vm, njs_vm_retval(vm), NJS_ERROR);
 }
 
 
 static njs_int_t
 njs_cipher_pkey(njs_vm_t *vm, njs_str_t *data, njs_webcrypto_key_t *key,
-    njs_index_t encrypt, njs_value_t *retval)
+    njs_index_t encrypt)
 {
     u_char                  *dst;
     size_t                  outlen;
@@ -781,7 +694,7 @@ njs_cipher_pkey(njs_vm_t *vm, njs_str_t *data, njs_webcrypto_key_t *key,
     EVP_PKEY_cipher_t       cipher;
     EVP_PKEY_cipher_init_t  init;
 
-    ctx = EVP_PKEY_CTX_new(key->u.a.pkey, NULL);
+    ctx = EVP_PKEY_CTX_new(key->pkey, NULL);
     if (njs_slow_path(ctx == NULL)) {
         njs_webcrypto_error(vm, "EVP_PKEY_CTX_new() failed");
         return NJS_ERROR;
@@ -820,7 +733,7 @@ njs_cipher_pkey(njs_vm_t *vm, njs_str_t *data, njs_webcrypto_key_t *key,
 
     dst = njs_mp_alloc(njs_vm_memory_pool(vm), outlen);
     if (njs_slow_path(dst == NULL)) {
-        njs_vm_memory_error(vm);
+        njs_memory_error(vm);
         ret = NJS_ERROR;
         goto fail;
     }
@@ -833,7 +746,7 @@ njs_cipher_pkey(njs_vm_t *vm, njs_str_t *data, njs_webcrypto_key_t *key,
         goto fail;
     }
 
-    ret = njs_vm_value_array_buffer_set(vm, retval, dst, outlen);
+    ret = njs_vm_value_array_buffer_set(vm, njs_vm_retval(vm), dst, outlen);
 
 fail:
 
@@ -845,23 +758,22 @@ fail:
 
 static njs_int_t
 njs_cipher_aes_gcm(njs_vm_t *vm, njs_str_t *data, njs_webcrypto_key_t *key,
-    njs_value_t *options, njs_bool_t encrypt, njs_value_t *retval)
+    njs_value_t *options, njs_bool_t encrypt)
 {
-    int                 len, outlen, dstlen;
-    u_char              *dst, *p;
-    int64_t             taglen;
-    njs_str_t           iv, aad;
-    njs_int_t           ret;
-    njs_value_t         *value;
-    EVP_CIPHER_CTX      *ctx;
-    const EVP_CIPHER    *cipher;
-    njs_opaque_value_t  lvalue;
+    int               len, outlen, dstlen;
+    u_char            *dst, *p;
+    int64_t           taglen;
+    njs_str_t         iv, aad;
+    njs_int_t         ret;
+    njs_value_t       value;
+    EVP_CIPHER_CTX    *ctx;
+    const EVP_CIPHER  *cipher;
 
-    static const njs_str_t  string_iv = njs_str("iv");
-    static const njs_str_t  string_ad = njs_str("additionalData");
-    static const njs_str_t  string_tl = njs_str("tagLength");
+    static const njs_value_t  string_iv = njs_string("iv");
+    static const njs_value_t  string_ad = njs_string("additionalData");
+    static const njs_value_t  string_tl = njs_string("tagLength");
 
-    switch (key->u.s.raw.length) {
+    switch (key->raw.length) {
     case 16:
         cipher = EVP_aes_128_gcm();
         break;
@@ -875,26 +787,33 @@ njs_cipher_aes_gcm(njs_vm_t *vm, njs_str_t *data, njs_webcrypto_key_t *key,
         break;
 
     default:
-        njs_vm_type_error(vm, "AES-GCM Invalid key length");
+        njs_type_error(vm, "AES-GCM Invalid key length");
         return NJS_ERROR;
     }
 
-    value = njs_vm_object_prop(vm, options, &string_iv, &lvalue);
-    if (value == NULL) {
-        njs_vm_type_error(vm, "AES-GCM algorithm.iv is not provided");
+    ret = njs_value_property(vm, options, njs_value_arg(&string_iv), &value);
+    if (njs_slow_path(ret != NJS_OK)) {
+        if (ret == NJS_DECLINED) {
+            njs_type_error(vm, "AES-GCM algorithm.iv is not provided");
+        }
+
         return NJS_ERROR;
     }
 
-    ret = njs_vm_value_to_bytes(vm, &iv, njs_value_arg(&lvalue));
+    ret = njs_vm_value_to_bytes(vm, &iv, &value);
     if (njs_slow_path(ret != NJS_OK)) {
         return NJS_ERROR;
     }
 
     taglen = 128;
 
-    value = njs_vm_object_prop(vm, options, &string_tl, &lvalue);
-    if (value != NULL && !njs_value_is_undefined(value)) {
-        ret = njs_value_to_integer(vm, value, &taglen);
+    ret = njs_value_property(vm, options, njs_value_arg(&string_tl), &value);
+    if (njs_slow_path(ret == NJS_ERROR)) {
+        return NJS_ERROR;
+    }
+
+    if (njs_is_defined(&value)) {
+        ret = njs_value_to_integer(vm, &value, &taglen);
         if (njs_slow_path(ret != NJS_OK)) {
             return NJS_ERROR;
         }
@@ -908,14 +827,14 @@ njs_cipher_aes_gcm(njs_vm_t *vm, njs_str_t *data, njs_webcrypto_key_t *key,
                       && taglen != 120
                       && taglen != 128))
     {
-        njs_vm_type_error(vm, "AES-GCM Invalid tagLength");
+        njs_type_error(vm, "AES-GCM Invalid tagLength");
         return NJS_ERROR;
     }
 
     taglen /= 8;
 
     if (njs_slow_path(!encrypt && (data->length < (size_t) taglen))) {
-        njs_vm_type_error(vm, "AES-GCM data is too short");
+        njs_type_error(vm, "AES-GCM data is too short");
         return NJS_ERROR;
     }
 
@@ -940,7 +859,7 @@ njs_cipher_aes_gcm(njs_vm_t *vm, njs_str_t *data, njs_webcrypto_key_t *key,
         goto fail;
     }
 
-    ret = EVP_CipherInit_ex(ctx, NULL, NULL, key->u.s.raw.start, iv.start,
+    ret = EVP_CipherInit_ex(ctx, NULL, NULL, key->raw.start, iv.start,
                             encrypt);
     if (njs_slow_path(ret <= 0)) {
         njs_webcrypto_error(vm, "EVP_%sInit_ex() failed",
@@ -959,11 +878,15 @@ njs_cipher_aes_gcm(njs_vm_t *vm, njs_str_t *data, njs_webcrypto_key_t *key,
         }
     }
 
+    ret = njs_value_property(vm, options, njs_value_arg(&string_ad), &value);
+    if (njs_slow_path(ret == NJS_ERROR)) {
+        return NJS_ERROR;
+    }
+
     aad.length = 0;
 
-    value = njs_vm_object_prop(vm, options, &string_ad, &lvalue);
-    if (value != NULL && !njs_value_is_undefined(value)) {
-        ret = njs_vm_value_to_bytes(vm, &aad, value);
+    if (njs_is_defined(&value)) {
+        ret = njs_vm_value_to_bytes(vm, &aad, &value);
         if (njs_slow_path(ret != NJS_OK)) {
             return NJS_ERROR;
         }
@@ -982,7 +905,7 @@ njs_cipher_aes_gcm(njs_vm_t *vm, njs_str_t *data, njs_webcrypto_key_t *key,
     dstlen = data->length + EVP_CIPHER_CTX_block_size(ctx) + taglen;
     dst = njs_mp_alloc(njs_vm_memory_pool(vm), dstlen);
     if (njs_slow_path(dst == NULL)) {
-        njs_vm_memory_error(vm);
+        njs_memory_error(vm);
         return NJS_ERROR;
     }
 
@@ -1020,7 +943,7 @@ njs_cipher_aes_gcm(njs_vm_t *vm, njs_str_t *data, njs_webcrypto_key_t *key,
         outlen += taglen;
     }
 
-    ret = njs_vm_value_array_buffer_set(vm, retval, dst, outlen);
+    ret = njs_vm_value_array_buffer_set(vm, njs_vm_retval(vm), dst, outlen);
 
 fail:
 
@@ -1136,23 +1059,22 @@ njs_counter128_reset(u_char *src, u_char *dst, njs_uint_t bits)
 
 static njs_int_t
 njs_cipher_aes_ctr(njs_vm_t *vm, njs_str_t *data, njs_webcrypto_key_t *key,
-    njs_value_t *options, njs_bool_t encrypt, njs_value_t *retval)
+    njs_value_t *options, njs_bool_t encrypt)
 {
-    int                 len, len2;
-    u_char              *dst;
-    int64_t             length;
-    BIGNUM              *total, *blocks, *left, *ctr;
-    njs_int_t           ret;
-    njs_str_t           iv;
-    njs_uint_t          size1;
-    njs_value_t         *value;
-    const EVP_CIPHER    *cipher;
-    njs_opaque_value_t  lvalue;
-    u_char              iv2[16];
+    int               len, len2;
+    u_char            *dst;
+    int64_t           length;
+    BIGNUM            *total, *blocks, *left, *ctr;
+    njs_int_t         ret;
+    njs_str_t         iv;
+    njs_uint_t        size1;
+    njs_value_t       value;
+    const EVP_CIPHER  *cipher;
+    u_char            iv2[16];
 
-    static const njs_str_t  string_counter = njs_str("counter");
+    static const njs_value_t  string_counter = njs_string("counter");
 
-    switch (key->u.s.raw.length) {
+    switch (key->raw.length) {
     case 16:
         cipher = EVP_aes_128_ctr();
         break;
@@ -1166,41 +1088,48 @@ njs_cipher_aes_ctr(njs_vm_t *vm, njs_str_t *data, njs_webcrypto_key_t *key,
         break;
 
     default:
-        njs_vm_type_error(vm, "AES-CTR Invalid key length");
+        njs_type_error(vm, "AES-CTR Invalid key length");
         return NJS_ERROR;
     }
 
-    value = njs_vm_object_prop(vm, options, &string_counter, &lvalue);
-    if (value == NULL) {
-        njs_vm_type_error(vm, "AES-CTR algorithm.counter is not provided");
+    ret = njs_value_property(vm, options, njs_value_arg(&string_counter),
+                             &value);
+    if (njs_slow_path(ret != NJS_OK)) {
+        if (ret == NJS_DECLINED) {
+            njs_type_error(vm, "AES-CTR algorithm.counter is not provided");
+        }
+
         return NJS_ERROR;
     }
 
-    ret = njs_vm_value_to_bytes(vm, &iv, value);
+    ret = njs_vm_value_to_bytes(vm, &iv, &value);
     if (njs_slow_path(ret != NJS_OK)) {
         return NJS_ERROR;
     }
 
     if (njs_slow_path(iv.length != 16)) {
-        njs_vm_type_error(vm, "AES-CTR algorithm.counter must be 16 bytes "
-                          "long");
+        njs_type_error(vm, "AES-CTR algorithm.counter must be 16 bytes long");
         return NJS_ERROR;
     }
 
-    value = njs_vm_object_prop(vm, options, &string_length, &lvalue);
-    if (value == NULL) {
-        njs_vm_type_error(vm, "AES-CTR algorithm.length is not provided");
+    ret = njs_value_property(vm, options, njs_value_arg(&string_length),
+                             &value);
+    if (njs_slow_path(ret != NJS_OK)) {
+        if (ret == NJS_DECLINED) {
+            njs_type_error(vm, "AES-CTR algorithm.length is not provided");
+        }
+
         return NJS_ERROR;
     }
 
-    ret = njs_value_to_integer(vm, value, &length);
+    ret = njs_value_to_integer(vm, &value, &length);
     if (njs_slow_path(ret != NJS_OK)) {
         return NJS_ERROR;
     }
 
     if (njs_slow_path(length == 0 || length > 128)) {
-        njs_vm_type_error(vm, "AES-CTR algorithm.length must be between "
-                          "1 and 128");
+        njs_type_error(vm, "AES-CTR algorithm.length "
+                       "must be between 1 and 128");
         return NJS_ERROR;
     }
 
@@ -1243,7 +1172,7 @@ njs_cipher_aes_ctr(njs_vm_t *vm, njs_str_t *data, njs_webcrypto_key_t *key,
 
     ret = BN_cmp(blocks, total);
     if (njs_slow_path(ret > 0)) {
-        njs_vm_type_error(vm, "AES-CTR repeated counter");
+        njs_type_error(vm, "AES-CTR repeated counter");
         ret = NJS_ERROR;
         goto fail;
     }
@@ -1264,7 +1193,7 @@ njs_cipher_aes_ctr(njs_vm_t *vm, njs_str_t *data, njs_webcrypto_key_t *key,
     dst = njs_mp_alloc(njs_vm_memory_pool(vm),
                        data->length + EVP_MAX_BLOCK_LENGTH);
     if (njs_slow_path(dst == NULL)) {
-        njs_vm_memory_error(vm);
+        njs_memory_error(vm);
         return NJS_ERROR;
     }
 
@@ -1276,7 +1205,7 @@ njs_cipher_aes_ctr(njs_vm_t *vm, njs_str_t *data, njs_webcrypto_key_t *key,
          * during the ciphering.
          * */
 
-        ret = njs_cipher_aes_ctr128(vm, cipher, key->u.s.raw.start,
+        ret = njs_cipher_aes_ctr128(vm, cipher, key->raw.start,
                                     data->start, data->length, iv.start, dst,
                                     &len, encrypt);
         if (njs_slow_path(ret != NJS_OK)) {
@@ -1294,17 +1223,17 @@ njs_cipher_aes_ctr(njs_vm_t *vm, njs_str_t *data, njs_webcrypto_key_t *key,
 
     size1 = BN_get_word(left) * AES_BLOCK_SIZE;
 
-    ret = njs_cipher_aes_ctr128(vm, cipher, key->u.s.raw.start, data->start,
-                                size1, iv.start, dst, &len, encrypt);
+    ret = njs_cipher_aes_ctr128(vm, cipher, key->raw.start, data->start, size1,
+                                iv.start, dst, &len, encrypt);
     if (njs_slow_path(ret != NJS_OK)) {
         goto fail;
     }
 
     njs_counter128_reset(iv.start, (u_char *) iv2, length);
 
-    ret = njs_cipher_aes_ctr128(vm, cipher, key->u.s.raw.start,
-                                &data->start[size1], data->length - size1,
-                                iv2, &dst[size1], &len2, encrypt);
+    ret = njs_cipher_aes_ctr128(vm, cipher, key->raw.start, &data->start[size1],
+                                data->length - size1, iv2, &dst[size1], &len2,
+                                encrypt);
     if (njs_slow_path(ret != NJS_OK)) {
         goto fail;
     }
@@ -1313,7 +1242,7 @@ njs_cipher_aes_ctr(njs_vm_t *vm, njs_str_t *data, njs_webcrypto_key_t *key,
 
 done:
 
-    ret = njs_vm_value_array_buffer_set(vm, retval, dst, len);
+    ret = njs_vm_value_array_buffer_set(vm, njs_vm_retval(vm), dst, len);
 
 fail:
 
@@ -1337,21 +1266,20 @@ fail:
 
 static njs_int_t
 njs_cipher_aes_cbc(njs_vm_t *vm, njs_str_t *data, njs_webcrypto_key_t *key,
-    njs_value_t *options, njs_bool_t encrypt, njs_value_t *retval)
+    njs_value_t *options, njs_bool_t encrypt)
 {
-    int                 olen_max, olen, olen2;
-    u_char              *dst;
-    unsigned            remainder;
-    njs_str_t           iv;
-    njs_int_t           ret;
-    njs_value_t         *value;
-    EVP_CIPHER_CTX      *ctx;
-    const EVP_CIPHER    *cipher;
-    njs_opaque_value_t  lvalue;
+    int               olen_max, olen, olen2;
+    u_char            *dst;
+    unsigned          remainder;
+    njs_str_t         iv;
+    njs_int_t         ret;
+    njs_value_t       value;
+    EVP_CIPHER_CTX    *ctx;
+    const EVP_CIPHER  *cipher;
 
-    static const njs_str_t  string_iv = njs_str("iv");
+    static const njs_value_t  string_iv = njs_string("iv");
 
-    switch (key->u.s.raw.length) {
+    switch (key->raw.length) {
     case 16:
         cipher = EVP_aes_128_cbc();
         break;
@@ -1365,23 +1293,26 @@ njs_cipher_aes_cbc(njs_vm_t *vm, njs_str_t *data, njs_webcrypto_key_t *key,
         break;
 
     default:
-        njs_vm_type_error(vm, "AES-CBC Invalid key length");
+        njs_type_error(vm, "AES-CBC Invalid key length");
         return NJS_ERROR;
     }
 
-    value = njs_vm_object_prop(vm, options, &string_iv, &lvalue);
-    if (value == NULL) {
-        njs_vm_type_error(vm, "AES-CBC algorithm.iv is not provided");
+    ret = njs_value_property(vm, options, njs_value_arg(&string_iv), &value);
+    if (njs_slow_path(ret != NJS_OK)) {
+        if (ret == NJS_DECLINED) {
+            njs_type_error(vm, "AES-CBC algorithm.iv is not provided");
+        }
+
         return NJS_ERROR;
     }
 
-    ret = njs_vm_value_to_bytes(vm, &iv, value);
+    ret = njs_vm_value_to_bytes(vm, &iv, &value);
     if (njs_slow_path(ret != NJS_OK)) {
         return NJS_ERROR;
     }
 
     if (njs_slow_path(iv.length != 16)) {
-        njs_vm_type_error(vm, "AES-CBC algorithm.iv must be 16 bytes long");
+        njs_type_error(vm, "AES-CBC algorithm.iv must be 16 bytes long");
         return NJS_ERROR;
     }
 
@@ -1398,7 +1329,7 @@ njs_cipher_aes_cbc(njs_vm_t *vm, njs_str_t *data, njs_webcrypto_key_t *key,
         return NJS_ERROR;
     }
 
-    ret = EVP_CipherInit_ex(ctx, cipher, NULL, key->u.s.raw.start, iv.start,
+    ret = EVP_CipherInit_ex(ctx, cipher, NULL, key->raw.start, iv.start,
                             encrypt);
     if (njs_slow_path(ret <= 0)) {
         njs_webcrypto_error(vm, "EVP_%SInit_ex() failed",
@@ -1409,7 +1340,7 @@ njs_cipher_aes_cbc(njs_vm_t *vm, njs_str_t *data, njs_webcrypto_key_t *key,
 
     dst = njs_mp_alloc(njs_vm_memory_pool(vm), olen_max);
     if (njs_slow_path(dst == NULL)) {
-        njs_vm_memory_error(vm);
+        njs_memory_error(vm);
         ret = NJS_ERROR;
         goto fail;
     }
@@ -1432,7 +1363,7 @@ njs_cipher_aes_cbc(njs_vm_t *vm, njs_str_t *data, njs_webcrypto_key_t *key,
 
     olen += olen2;
 
-    ret = njs_vm_value_array_buffer_set(vm, retval, dst, olen);
+    ret = njs_vm_value_array_buffer_set(vm, njs_vm_retval(vm), dst, olen);
 
 fail:
 
@@ -1443,190 +1374,8 @@ fail:
 
 
 static njs_int_t
-njs_ext_derive_ecdh(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t derive_key, njs_webcrypto_key_t *key, njs_value_t *retval)
-{
-    u_char                     *k;
-    size_t                     olen;
-    int64_t                    length;
-    unsigned                   usage;
-    EVP_PKEY                   *priv_pkey, *pub_pkey;
-    njs_int_t                  ret;
-    njs_value_t                *value, *dobject;
-    EVP_PKEY_CTX               *pctx;
-    njs_opaque_value_t         lvalue;
-    njs_webcrypto_key_t        *dkey, *pkey;
-    njs_webcrypto_algorithm_t  *dalg;
-
-    static const njs_str_t  string_public = njs_str("public");
-
-    dobject = njs_arg(args, nargs, 3);
-
-    if (derive_key) {
-        dalg = njs_key_algorithm(vm, dobject);
-        if (njs_slow_path(dalg == NULL)) {
-            goto fail;
-        }
-
-        value = njs_vm_object_prop(vm, dobject, &string_length, &lvalue);
-        if (value == NULL) {
-            njs_vm_type_error(vm, "derivedKeyAlgorithm.length is not provided");
-            goto fail;
-        }
-
-    } else {
-        dalg = NULL;
-        value = dobject;
-    }
-
-    ret = njs_value_to_integer(vm, value, &length);
-    if (njs_slow_path(ret != NJS_OK)) {
-        goto fail;
-    }
-
-    dkey = NULL;
-    length /= 8;
-
-    if (derive_key) {
-        ret = njs_key_usage(vm, njs_arg(args, nargs, 5), &usage);
-        if (njs_slow_path(ret != NJS_OK)) {
-            goto fail;
-        }
-
-        if (njs_slow_path(usage & ~dalg->usage)) {
-            njs_vm_type_error(vm, "unsupported key usage for \"ECDH\" key");
-            goto fail;
-        }
-
-        dkey = njs_mp_zalloc(njs_vm_memory_pool(vm),
-                             sizeof(njs_webcrypto_key_t));
-        if (njs_slow_path(dkey == NULL)) {
-            njs_vm_memory_error(vm);
-            goto fail;
-        }
-
-        dkey->alg = dalg;
-        dkey->usage = usage;
-    }
-
-    value = njs_vm_object_prop(vm, njs_arg(args, nargs, 1), &string_public,
-                               &lvalue);
-    if (value == NULL) {
-        njs_vm_type_error(vm, "ECDH algorithm.public is not provided");
-        goto fail;
-    }
-
-    pkey = njs_vm_external(vm, njs_webcrypto_crypto_key_proto_id, value);
-    if (njs_slow_path(pkey == NULL)) {
-        njs_vm_type_error(vm, "algorithm.public is not a CryptoKey object");
-        goto fail;
-    }
-
-    if (njs_slow_path(pkey->alg->type != NJS_ALGORITHM_ECDH)) {
-        njs_vm_type_error(vm, "algorithm.public is not an ECDH key");
-        goto fail;
-    }
-
-    if (njs_slow_path(key->u.a.curve != pkey->u.a.curve)) {
-        njs_vm_type_error(vm, "ECDH keys must use the same curve");
-        goto fail;
-    }
-
-    if (!key->u.a.privat) {
-        njs_vm_type_error(vm, "baseKey must be a private key for ECDH");
-        goto fail;
-    }
-
-    if (pkey->u.a.privat) {
-        njs_vm_type_error(vm, "algorithm.public must be a public key");
-        goto fail;
-    }
-
-    priv_pkey = key->u.a.pkey;
-    pub_pkey = pkey->u.a.pkey;
-
-    pctx = EVP_PKEY_CTX_new(priv_pkey, NULL);
-    if (njs_slow_path(pctx == NULL)) {
-        njs_webcrypto_error(vm, "EVP_PKEY_CTX_new() failed");
-        goto fail;
-    }
-
-    if (EVP_PKEY_derive_init(pctx) != 1) {
-        njs_webcrypto_error(vm, "EVP_PKEY_derive_init() failed");
-        EVP_PKEY_CTX_free(pctx);
-        goto fail;
-    }
-
-    if (EVP_PKEY_derive_set_peer(pctx, pub_pkey) != 1) {
-        njs_webcrypto_error(vm, "EVP_PKEY_derive_set_peer() failed");
-        EVP_PKEY_CTX_free(pctx);
-        goto fail;
-    }
-
-    olen = (size_t) length;
-    if (EVP_PKEY_derive(pctx, NULL, &olen) != 1) {
-        njs_webcrypto_error(vm, "EVP_PKEY_derive() failed (size query)");
-        EVP_PKEY_CTX_free(pctx);
-        goto fail;
-    }
-
-    if (njs_slow_path(olen < (size_t) length)) {
-        njs_vm_type_error(vm, "derived bit length is too small");
-        EVP_PKEY_CTX_free(pctx);
-        goto fail;
-    }
-
-    k = njs_mp_alloc(njs_vm_memory_pool(vm), olen);
-    if (njs_slow_path(k == NULL)) {
-        njs_vm_memory_error(vm);
-        EVP_PKEY_CTX_free(pctx);
-        goto fail;
-    }
-
-    if (EVP_PKEY_derive(pctx, k, &olen) != 1) {
-        njs_webcrypto_error(vm, "EVP_PKEY_derive() failed");
-        EVP_PKEY_CTX_free(pctx);
-        goto fail;
-    }
-
-    EVP_PKEY_CTX_free(pctx);
-
-    if (derive_key) {
-        if (dalg->type == NJS_ALGORITHM_HMAC) {
-            ret = njs_algorithm_hash(vm, dobject, &dkey->hash);
-            if (njs_slow_path(ret == NJS_ERROR)) {
-                goto fail;
-            }
-        }
-
-        dkey->extractable = njs_value_bool(njs_arg(args, nargs, 4));
-
-        dkey->u.s.raw.start = k;
-        dkey->u.s.raw.length = length;
-
-        ret = njs_vm_external_create(vm, njs_value_arg(&lvalue),
-                                     njs_webcrypto_crypto_key_proto_id,
-                                     dkey, 0);
-    } else {
-        ret = njs_vm_value_array_buffer_set(vm, njs_value_arg(&lvalue), k,
-                                            length);
-    }
-
-    if (njs_slow_path(ret != NJS_OK)) {
-        goto fail;
-    }
-
-    return njs_webcrypto_result(vm, &lvalue, NJS_OK, retval);
-
-fail:
-
-    return njs_webcrypto_result(vm, NULL, NJS_ERROR, retval);
-}
-
-
-static njs_int_t
 njs_ext_derive(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t derive_key, njs_value_t *retval)
+    njs_index_t derive_key)
 {
     u_char                     *k;
     size_t                     olen;
@@ -1634,17 +1383,16 @@ njs_ext_derive(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
     unsigned                   usage, mask;
     njs_int_t                  ret;
     njs_str_t                  salt, info;
-    njs_value_t                *value, *aobject, *dobject;
+    njs_value_t                value, *aobject, *dobject;
     const EVP_MD               *md;
     EVP_PKEY_CTX               *pctx;
-    njs_opaque_value_t         lvalue;
     njs_webcrypto_key_t        *key, *dkey;
     njs_webcrypto_hash_t       hash;
     njs_webcrypto_algorithm_t  *alg, *dalg;
 
-    static const njs_str_t  string_info = njs_str("info");
-    static const njs_str_t  string_salt = njs_str("salt");
-    static const njs_str_t  string_iterations = njs_str("iterations");
+    static const njs_value_t  string_info = njs_string("info");
+    static const njs_value_t  string_salt = njs_string("salt");
+    static const njs_value_t  string_iterations = njs_string("iterations");
 
     aobject = njs_arg(args, nargs, 1);
     alg = njs_key_algorithm(vm, aobject);
@@ -1655,27 +1403,23 @@ njs_ext_derive(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
     key = njs_vm_external(vm, njs_webcrypto_crypto_key_proto_id,
                           njs_arg(args, nargs, 2));
     if (njs_slow_path(key == NULL)) {
-        njs_vm_type_error(vm, "\"baseKey\" is not a CryptoKey object");
+        njs_type_error(vm, "\"baseKey\" is not a CryptoKey object");
         goto fail;
     }
 
     mask = derive_key ? NJS_KEY_USAGE_DERIVE_KEY : NJS_KEY_USAGE_DERIVE_BITS;
     if (njs_slow_path(!(key->usage & mask))) {
-        njs_vm_type_error(vm, "provide key does not support \"%s\" operation",
-                          derive_key ? "deriveKey" : "deriveBits");
+        njs_type_error(vm, "provide key does not support \"%s\" operation",
+                       derive_key ? "deriveKey" : "deriveBits");
         goto fail;
     }
 
     if (njs_slow_path(key->alg != alg)) {
-        njs_vm_type_error(vm, "cannot derive %s using \"%V\" with \"%V\" key",
-                          derive_key ? "key" : "bits",
-                          njs_algorithm_string(key->alg),
-                          njs_algorithm_string(alg));
+        njs_type_error(vm, "cannot derive %s using \"%V\" with \"%V\" key",
+                       derive_key ? "key" : "bits",
+                       njs_algorithm_string(key->alg),
+                       njs_algorithm_string(alg));
         goto fail;
-    }
-
-    if (alg->type == NJS_ALGORITHM_ECDH) {
-        return njs_ext_derive_ecdh(vm, args, nargs, derive_key, key, retval);
     }
 
     dobject = njs_arg(args, nargs, 3);
@@ -1686,18 +1430,22 @@ njs_ext_derive(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
             goto fail;
         }
 
-        value = njs_vm_object_prop(vm, dobject, &string_length, &lvalue);
-        if (value == NULL) {
-            njs_vm_type_error(vm, "derivedKeyAlgorithm.length is not provided");
-            goto fail;
+        ret = njs_value_property(vm, dobject, njs_value_arg(&string_length),
+                                 &value);
+        if (njs_slow_path(ret != NJS_OK)) {
+                if (ret == NJS_DECLINED) {
+                    njs_type_error(vm, "derivedKeyAlgorithm.length "
+                                   "is not provided");
+                    goto fail;
+                }
         }
 
     } else {
         dalg = NULL;
-        value = dobject;
+        njs_value_assign(&value, dobject);
     }
 
-    ret = njs_value_to_integer(vm, value, &length);
+    ret = njs_value_to_integer(vm, &value, &length);
     if (njs_slow_path(ret != NJS_OK)) {
         goto fail;
     }
@@ -1712,19 +1460,16 @@ njs_ext_derive(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
         case NJS_ALGORITHM_AES_CBC:
 
             if (length != 16 && length != 32) {
-                njs_vm_type_error(vm, "deriveKey \"%V\" length must be "
-                                  "128 or 256", njs_algorithm_string(dalg));
+                njs_type_error(vm, "deriveKey \"%V\" length must be 128 or 256",
+                               njs_algorithm_string(dalg));
                 goto fail;
             }
 
             break;
 
-        case NJS_ALGORITHM_HMAC:
-            break;
-
         default:
-            njs_vm_internal_error(vm, "not implemented deriveKey: \"%V\"",
-                                  njs_algorithm_string(dalg));
+            njs_internal_error(vm, "not implemented deriveKey: \"%V\"",
+                               njs_algorithm_string(dalg));
             goto fail;
         }
 
@@ -1734,15 +1479,15 @@ njs_ext_derive(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
         }
 
         if (njs_slow_path(usage & ~dalg->usage)) {
-            njs_vm_type_error(vm, "unsupported key usage for \"%V\" key",
-                              njs_algorithm_string(alg));
+            njs_type_error(vm, "unsupported key usage for \"%V\" key",
+                           njs_algorithm_string(alg));
             goto fail;
         }
 
         dkey = njs_mp_zalloc(njs_vm_memory_pool(vm),
                              sizeof(njs_webcrypto_key_t));
         if (njs_slow_path(dkey == NULL)) {
-            njs_vm_memory_error(vm);
+            njs_memory_error(vm);
             goto fail;
         }
 
@@ -1752,7 +1497,7 @@ njs_ext_derive(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
 
     k = njs_mp_zalloc(njs_vm_memory_pool(vm), length);
     if (njs_slow_path(k == NULL)) {
-        njs_vm_memory_error(vm);
+        njs_memory_error(vm);
         goto fail;
     }
 
@@ -1763,38 +1508,46 @@ njs_ext_derive(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
             goto fail;
         }
 
-        value = njs_vm_object_prop(vm, aobject, &string_salt, &lvalue);
-        if (value == NULL) {
-            njs_vm_type_error(vm, "PBKDF2 algorithm.salt is not provided");
+        ret = njs_value_property(vm, aobject, njs_value_arg(&string_salt),
+                                 &value);
+        if (njs_slow_path(ret != NJS_OK)) {
+            if (ret == NJS_DECLINED) {
+                njs_type_error(vm, "PBKDF2 algorithm.salt is not provided");
+            }
+
             goto fail;
         }
 
-        ret = njs_vm_value_to_bytes(vm, &salt, value);
+        ret = njs_vm_value_to_bytes(vm, &salt, &value);
         if (njs_slow_path(ret != NJS_OK)) {
             goto fail;
         }
 
         if (njs_slow_path(salt.length < 16)) {
-            njs_vm_type_error(vm, "PBKDF2 algorithm.salt must be "
-                              "at least 16 bytes long");
+            njs_type_error(vm, "PBKDF2 algorithm.salt must be "
+                           "at least 16 bytes long");
             goto fail;
         }
 
-        value = njs_vm_object_prop(vm, aobject, &string_iterations, &lvalue);
-        if (value == NULL) {
-            njs_vm_type_error(vm, "PBKDF2 algorithm.iterations is not "
-                              "provided");
+        ret = njs_value_property(vm, aobject, njs_value_arg(&string_iterations),
+                                 &value);
+        if (njs_slow_path(ret != NJS_OK)) {
+            if (ret == NJS_DECLINED) {
+                njs_type_error(vm, "PBKDF2 algorithm.iterations "
+                               "is not provided");
+            }
+
             goto fail;
         }
 
-        ret = njs_value_to_integer(vm, value, &iterations);
+        ret = njs_value_to_integer(vm, &value, &iterations);
         if (njs_slow_path(ret != NJS_OK)) {
             goto fail;
         }
 
         md = njs_algorithm_hash_digest(hash);
 
-        ret = PKCS5_PBKDF2_HMAC((char *) key->u.s.raw.start, key->u.s.raw.length,
+        ret = PKCS5_PBKDF2_HMAC((char *) key->raw.start, key->raw.length,
                                 salt.start, salt.length, iterations, md,
                                 length, k);
         if (njs_slow_path(ret <= 0)) {
@@ -1810,24 +1563,32 @@ njs_ext_derive(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
             goto fail;
         }
 
-        value = njs_vm_object_prop(vm, aobject, &string_salt, &lvalue);
-        if (value == NULL) {
-            njs_vm_type_error(vm, "HKDF algorithm.salt is not provided");
+        ret = njs_value_property(vm, aobject, njs_value_arg(&string_salt),
+                                 &value);
+        if (njs_slow_path(ret != NJS_OK)) {
+            if (ret == NJS_DECLINED) {
+                njs_type_error(vm, "HKDF algorithm.salt is not provided");
+            }
+
             goto fail;
         }
 
-        ret = njs_vm_value_to_bytes(vm, &salt, value);
+        ret = njs_vm_value_to_bytes(vm, &salt, &value);
         if (njs_slow_path(ret != NJS_OK)) {
             goto fail;
         }
 
-        value = njs_vm_object_prop(vm, aobject, &string_info, &lvalue);
-        if (value == NULL) {
-            njs_vm_type_error(vm, "HKDF algorithm.info is not provided");
+        ret = njs_value_property(vm, aobject, njs_value_arg(&string_info),
+                                 &value);
+        if (njs_slow_path(ret != NJS_OK)) {
+            if (ret == NJS_DECLINED) {
+                njs_type_error(vm, "HKDF algorithm.info is not provided");
+            }
+
             goto fail;
         }
 
-        ret = njs_vm_value_to_bytes(vm, &info, value);
+        ret = njs_vm_value_to_bytes(vm, &info, &value);
         if (njs_slow_path(ret != NJS_OK)) {
             goto fail;
         }
@@ -1858,8 +1619,7 @@ njs_ext_derive(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
             goto free;
         }
 
-        ret = EVP_PKEY_CTX_set1_hkdf_key(pctx, key->u.s.raw.start,
-                                         key->u.s.raw.length);
+        ret = EVP_PKEY_CTX_set1_hkdf_key(pctx, key->raw.start, key->raw.length);
         if (njs_slow_path(ret <= 0)) {
             njs_webcrypto_error(vm, "EVP_PKEY_CTX_set1_hkdf_key() failed");
             goto free;
@@ -1894,9 +1654,10 @@ free:
         (void) &info;
 #endif
 
+    case NJS_ALGORITHM_ECDH:
     default:
-        njs_vm_internal_error(vm, "not implemented deriveKey "
-                              "algorithm: \"%V\"", njs_algorithm_string(alg));
+        njs_internal_error(vm, "not implemented deriveKey "
+                           "algorithm: \"%V\"", njs_algorithm_string(alg));
         goto fail;
     }
 
@@ -1908,40 +1669,38 @@ free:
             }
         }
 
-        dkey->extractable = njs_value_bool(njs_arg(args, nargs, 4));
-        dkey->u.s.raw.start = k;
-        dkey->u.s.raw.length = length;
+        dkey->raw.start = k;
+        dkey->raw.length = length;
 
-        ret = njs_vm_external_create(vm, njs_value_arg(&lvalue),
+        ret = njs_vm_external_create(vm, &value,
                                      njs_webcrypto_crypto_key_proto_id,
                                      dkey, 0);
     } else {
-        ret = njs_vm_value_array_buffer_set(vm, njs_value_arg(&lvalue), k,
-                                            length);
+        ret = njs_vm_value_array_buffer_set(vm, &value, k, length);
     }
 
     if (njs_slow_path(ret != NJS_OK)) {
         goto fail;
     }
 
-    return njs_webcrypto_result(vm, &lvalue, NJS_OK, retval);
+    return njs_webcrypto_result(vm, &value, NJS_OK);
 
 fail:
 
-    return njs_webcrypto_result(vm, NULL, NJS_ERROR, retval);
+    return njs_webcrypto_result(vm, njs_vm_retval(vm), NJS_ERROR);
 }
 
 
 static njs_int_t
 njs_ext_digest(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+    njs_index_t unused)
 {
     unsigned              olen;
     u_char                *dst;
     njs_str_t             data;
     njs_int_t             ret;
+    njs_value_t           value;
     const EVP_MD          *md;
-    njs_opaque_value_t    result;
     njs_webcrypto_hash_t  hash;
 
     ret = njs_algorithm_hash(vm, njs_arg(args, nargs, 1), &hash);
@@ -1959,7 +1718,7 @@ njs_ext_digest(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
 
     dst = njs_mp_zalloc(njs_vm_memory_pool(vm), olen);
     if (njs_slow_path(dst == NULL)) {
-        njs_vm_memory_error(vm);
+        njs_memory_error(vm);
         goto fail;
     }
 
@@ -1969,22 +1728,22 @@ njs_ext_digest(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
         goto fail;
     }
 
-    ret = njs_vm_value_array_buffer_set(vm, njs_value_arg(&result), dst, olen);
+    ret = njs_vm_value_array_buffer_set(vm, &value, dst, olen);
     if (njs_slow_path(ret != NJS_OK)) {
         goto fail;
     }
 
-    return njs_webcrypto_result(vm, &result, NJS_OK, retval);
+    return njs_webcrypto_result(vm, &value, NJS_OK);
 
 fail:
 
-    return njs_webcrypto_result(vm, NULL, NJS_ERROR, retval);
+    return njs_webcrypto_result(vm, njs_vm_retval(vm), NJS_ERROR);
 }
 
 
 static njs_int_t
-njs_export_base64url_bignum(njs_vm_t *vm, njs_opaque_value_t *retval,
-    const BIGNUM *v, size_t size)
+njs_export_base64url_bignum(njs_vm_t *vm, njs_value_t *retval, const BIGNUM *v,
+    size_t size)
 {
     njs_str_t  src;
     u_char     buf[512];
@@ -2000,37 +1759,38 @@ njs_export_base64url_bignum(njs_vm_t *vm, njs_opaque_value_t *retval,
     src.start = buf;
     src.length = size;
 
-    return njs_string_base64url(vm, njs_value_arg(retval), &src);
+    return njs_string_base64url(vm, retval, &src);
 }
 
 
 static njs_int_t
-njs_base64url_bignum_set(njs_vm_t *vm, njs_value_t *jwk, const njs_str_t *key,
+njs_base64url_bignum_set(njs_vm_t *vm, njs_value_t *jwk, njs_value_t *key,
     const BIGNUM *v, size_t size)
 {
-    njs_int_t           ret;
-    njs_opaque_value_t  value;
+    njs_int_t    ret;
+    njs_value_t  value;
 
     ret = njs_export_base64url_bignum(vm, &value, v, size);
     if (ret != NJS_OK) {
         return NJS_ERROR;
     }
 
-    return njs_vm_object_prop_set(vm, jwk, key, &value);
+    return njs_value_property_set(vm, jwk, key, &value);
 }
 
 
 static njs_int_t
 njs_export_jwk_rsa(njs_vm_t *vm, njs_webcrypto_key_t *key, njs_value_t *retval)
 {
-    njs_int_t           ret;
-    const RSA           *rsa;
-    njs_str_t           *nm;
-    const BIGNUM        *n_bn, *e_bn, *d_bn, *p_bn, *q_bn, *dp_bn, *dq_bn,
-                        *qi_bn;
-    njs_opaque_value_t  nvalue, evalue, alg, rsa_s;
+    njs_int_t     ret;
+    const RSA     *rsa;
+    njs_str_t     *nm;
+    njs_value_t   nvalue, evalue, alg;
+    const BIGNUM  *n_bn, *e_bn, *d_bn, *p_bn, *q_bn, *dp_bn, *dq_bn, *qi_bn;
 
-    rsa = njs_pkey_get_rsa_key(key->u.a.pkey);
+    static const njs_value_t  rsa_str = njs_string("RSA");
+
+    rsa = njs_pkey_get_rsa_key(key->pkey);
 
     njs_rsa_get0_key(rsa, &n_bn, &e_bn, &d_bn);
 
@@ -2044,58 +1804,48 @@ njs_export_jwk_rsa(njs_vm_t *vm, njs_webcrypto_key_t *key, njs_value_t *retval)
         return NJS_ERROR;
     }
 
-    ret = njs_vm_object_alloc(vm, retval, NULL);
+    ret = njs_vm_object_alloc(vm, retval, &string_kty, &rsa_str, &string_n,
+                              &nvalue, &string_e, &evalue, NULL);
     if (ret != NJS_OK) {
         return NJS_ERROR;
     }
 
-    njs_vm_value_string_create(vm, njs_value_arg(&rsa_s), (u_char *) "RSA", 3);
-
-    ret = njs_vm_object_prop_set(vm, retval, &string_kty, &rsa_s);
-    if (ret != NJS_OK) {
-        return NJS_ERROR;
-    }
-
-    ret = njs_vm_object_prop_set(vm, retval, &string_n, &nvalue);
-    if (ret != NJS_OK) {
-        return NJS_ERROR;
-    }
-
-    ret = njs_vm_object_prop_set(vm, retval, &string_e, &evalue);
-    if (ret != NJS_OK) {
-        return NJS_ERROR;
-    }
-
-    if (key->u.a.privat) {
+    if (key->privat) {
         njs_rsa_get0_factors(rsa, &p_bn, &q_bn);
         njs_rsa_get0_ctr_params(rsa, &dp_bn, &dq_bn, &qi_bn);
 
-        ret = njs_base64url_bignum_set(vm, retval, &string_d, d_bn, 0);
+        ret = njs_base64url_bignum_set(vm, retval, njs_value_arg(&string_d),
+                                       d_bn, 0);
         if (ret != NJS_OK) {
             return NJS_ERROR;
         }
 
-        ret = njs_base64url_bignum_set(vm, retval, &string_p, p_bn, 0);
+        ret = njs_base64url_bignum_set(vm, retval, njs_value_arg(&string_p),
+                                       p_bn, 0);
         if (ret != NJS_OK) {
             return NJS_ERROR;
         }
 
-        ret = njs_base64url_bignum_set(vm, retval, &string_q, q_bn, 0);
+        ret = njs_base64url_bignum_set(vm, retval, njs_value_arg(&string_q),
+                                       q_bn, 0);
         if (ret != NJS_OK) {
             return NJS_ERROR;
         }
 
-        ret = njs_base64url_bignum_set(vm, retval, &string_dp, dp_bn, 0);
+        ret = njs_base64url_bignum_set(vm, retval, njs_value_arg(&string_dp),
+                                       dp_bn, 0);
         if (ret != NJS_OK) {
             return NJS_ERROR;
         }
 
-        ret = njs_base64url_bignum_set(vm, retval, &string_dq, dq_bn, 0);
+        ret = njs_base64url_bignum_set(vm, retval, njs_value_arg(&string_dq),
+                                       dq_bn, 0);
         if (ret != NJS_OK) {
             return NJS_ERROR;
         }
 
-        ret = njs_base64url_bignum_set(vm, retval, &string_qi, qi_bn, 0);
+        ret = njs_base64url_bignum_set(vm, retval, njs_value_arg(&string_qi),
+                                       qi_bn, 0);
         if (ret != NJS_OK) {
             return NJS_ERROR;
         }
@@ -2103,37 +1853,38 @@ njs_export_jwk_rsa(njs_vm_t *vm, njs_webcrypto_key_t *key, njs_value_t *retval)
 
     nm = &njs_webcrypto_alg_name[key->alg->type][key->hash];
 
-    (void) njs_vm_value_string_create(vm, njs_value_arg(&alg), nm->start,
-                                      nm->length);
+    (void) njs_vm_value_string_set(vm, &alg, nm->start, nm->length);
 
-    return njs_vm_object_prop_set(vm, retval, &string_alg, &alg);
+    return njs_value_property_set(vm, retval, njs_value_arg(&string_alg), &alg);
 }
 
 
 static njs_int_t
 njs_export_jwk_ec(njs_vm_t *vm, njs_webcrypto_key_t *key, njs_value_t *retval)
 {
-    int                 nid, group_bits, group_bytes;
-    BIGNUM              *x_bn, *y_bn;
-    njs_int_t           ret;
-    njs_str_t           *cname;
-    const EC_KEY        *ec;
-    const BIGNUM        *d_bn;
-    const EC_POINT      *pub;
-    const EC_GROUP      *group;
-    njs_opaque_value_t  xvalue, yvalue, dvalue, name, ec_s;
+    int                    nid, group_bits, group_bytes;
+    BIGNUM                 *x_bn, *y_bn;
+    njs_int_t              ret;
+    njs_value_t            xvalue, yvalue, dvalue, name;
+    const EC_KEY           *ec;
+    const BIGNUM           *d_bn;
+    const EC_POINT         *pub;
+    const EC_GROUP         *group;
+    njs_webcrypto_entry_t  *e;
+
+    static const njs_value_t  ec_str = njs_string("EC");
 
     x_bn = NULL;
     y_bn = NULL;
     d_bn = NULL;
 
-    ec = njs_pkey_get_ec_key(key->u.a.pkey);
+    ec = njs_pkey_get_ec_key(key->pkey);
 
     pub = EC_KEY_get0_public_key(ec);
     group = EC_KEY_get0_group(ec);
 
     group_bits = EC_GROUP_get_degree(group);
-    group_bytes = (group_bits / 8) + (7 + (group_bits % 8)) / 8;
+    group_bytes = (group_bits / CHAR_BIT) + (7 + (group_bits % CHAR_BIT)) / 8;
 
     x_bn = BN_new();
     if (x_bn == NULL) {
@@ -2168,43 +1919,27 @@ njs_export_jwk_ec(njs_vm_t *vm, njs_webcrypto_key_t *key, njs_value_t *retval)
 
     nid = EC_GROUP_get_curve_name(group);
 
-    cname = njs_algorithm_curve_name(nid);
-    (void) njs_vm_value_string_create(vm, njs_value_arg(&name),
-                                      cname->start, cname->length);
+    for (e = &njs_webcrypto_curve[0]; e->name.length != 0; e++) {
+        if ((uintptr_t) nid == e->value) {
+            (void) njs_vm_value_string_set(vm, &name, e->name.start,
+                                           e->name.length);
+            break;
+        }
+    }
 
-    if (cname->length == 0) {
-        njs_vm_type_error(vm, "Unsupported JWK EC curve: %s", OBJ_nid2sn(nid));
+    if (e->name.length == 0) {
+        njs_type_error(vm, "Unsupported JWK EC curve: %s", OBJ_nid2sn(nid));
         goto fail;
     }
 
-    ret = njs_vm_object_alloc(vm, retval, NULL);
+    ret = njs_vm_object_alloc(vm, retval, &string_kty, &ec_str, &string_x,
+                              &xvalue, &string_y, &yvalue, &string_crv, &name,
+                              NULL);
     if (ret != NJS_OK) {
         goto fail;
     }
 
-    njs_vm_value_string_create(vm, njs_value_arg(&ec_s), (u_char *) "EC", 2);
-
-    ret = njs_vm_object_prop_set(vm, retval, &string_kty, &ec_s);
-    if (ret != NJS_OK) {
-        return NJS_ERROR;
-    }
-
-    ret = njs_vm_object_prop_set(vm, retval, &string_x, &xvalue);
-    if (ret != NJS_OK) {
-        return NJS_ERROR;
-    }
-
-    ret = njs_vm_object_prop_set(vm, retval, &string_y, &yvalue);
-    if (ret != NJS_OK) {
-        return NJS_ERROR;
-    }
-
-    ret = njs_vm_object_prop_set(vm, retval, &string_crv, &name);
-    if (ret != NJS_OK) {
-        return NJS_ERROR;
-    }
-
-    if (key->u.a.privat) {
+    if (key->privat) {
         d_bn = EC_KEY_get0_private_key(ec);
 
         ret = njs_export_base64url_bignum(vm, &dvalue, d_bn, group_bytes);
@@ -2212,7 +1947,8 @@ njs_export_jwk_ec(njs_vm_t *vm, njs_webcrypto_key_t *key, njs_value_t *retval)
             goto fail;
         }
 
-        ret = njs_vm_object_prop_set(vm, retval, &string_d, &dvalue);
+        ret = njs_value_property_set(vm, retval, njs_value_arg(&string_d),
+                                     &dvalue);
         if (ret != NJS_OK) {
             goto fail;
         }
@@ -2244,15 +1980,15 @@ njs_export_raw_ec(njs_vm_t *vm, njs_webcrypto_key_t *key, njs_value_t *retval)
     const EC_POINT           *point;
     point_conversion_form_t  form;
 
-    njs_assert(key->u.a.pkey != NULL);
+    njs_assert(key->pkey != NULL);
 
-    if (key->u.a.privat) {
-        njs_vm_type_error(vm, "private key of \"%V\" cannot be exported "
-                          "in \"raw\" format", njs_algorithm_string(key->alg));
+    if (key->privat) {
+        njs_type_error(vm, "private key of \"%V\" cannot be exported "
+                       "in \"raw\" format", njs_algorithm_string(key->alg));
         return NJS_ERROR;
     }
 
-    ec = njs_pkey_get_ec_key(key->u.a.pkey);
+    ec = njs_pkey_get_ec_key(key->pkey);
 
     group = EC_KEY_get0_group(ec);
     point = EC_KEY_get0_public_key(ec);
@@ -2283,14 +2019,14 @@ static njs_int_t
 njs_export_jwk_asymmetric(njs_vm_t *vm, njs_webcrypto_key_t *key,
     njs_value_t *retval)
 {
-    njs_int_t           ret;
-    njs_opaque_value_t  ops, extractable;
+    njs_int_t    ret;
+    njs_value_t  ops, extractable;
 
-    njs_assert(key->u.a.pkey != NULL);
+    njs_assert(key->pkey != NULL);
 
-    switch (EVP_PKEY_id(key->u.a.pkey)) {
+    switch (EVP_PKEY_id(key->pkey)) {
     case EVP_PKEY_RSA:
-#if (OPENSSL_VERSION_NUMBER >= 0x10101001L)
+#if (OPENSSL_VERSION_NUMBER >= 0x10100001L)
     case EVP_PKEY_RSA_PSS:
 #endif
         ret = njs_export_jwk_rsa(vm, key, retval);
@@ -2309,23 +2045,24 @@ njs_export_jwk_asymmetric(njs_vm_t *vm, njs_webcrypto_key_t *key,
         break;
 
     default:
-        njs_vm_type_error(vm, "provided key cannot be exported as JWK");
+        njs_type_error(vm, "provided key cannot be exported as JWK");
         return NJS_ERROR;
     }
 
-    ret = njs_key_ops(vm, njs_value_arg(&ops), key->usage);
+    ret = njs_key_ops(vm, &ops, key->usage);
     if (njs_slow_path(ret != NJS_OK)) {
         return NJS_ERROR;
     }
 
-    ret = njs_vm_object_prop_set(vm, retval, &key_ops, &ops);
+    ret = njs_value_property_set(vm, retval, njs_value_arg(&key_ops), &ops);
     if (njs_slow_path(ret != NJS_OK)) {
         return NJS_ERROR;
     }
 
-    njs_value_boolean_set(njs_value_arg(&extractable), key->extractable);
+    njs_value_boolean_set(&extractable, key->extractable);
 
-    return njs_vm_object_prop_set(vm, retval, &string_ext, &extractable);
+    return njs_value_property_set(vm, retval, njs_value_arg(&string_ext),
+                                  &extractable);
 }
 
 
@@ -2334,12 +2071,14 @@ njs_export_jwk_oct(njs_vm_t *vm, njs_webcrypto_key_t *key, njs_value_t *retval)
 {
     njs_int_t            ret;
     njs_str_t            *nm;
-    njs_opaque_value_t   k, alg, ops, extractable, oct_s;
+    njs_value_t          k, alg, ops, extractable;
     njs_webcrypto_alg_t  type;
 
-    njs_assert(key->u.s.raw.start != NULL);
+    static const njs_value_t  oct_str = njs_string("oct");
 
-    ret = njs_string_base64url(vm, njs_value_arg(&k), &key->u.s.raw);
+    njs_assert(key->raw.start != NULL);
+
+    ret = njs_string_base64url(vm, &k, &key->raw);
     if (njs_slow_path(ret != NJS_OK)) {
         return NJS_ERROR;
     }
@@ -2348,62 +2087,41 @@ njs_export_jwk_oct(njs_vm_t *vm, njs_webcrypto_key_t *key, njs_value_t *retval)
 
     if (key->alg->type == NJS_ALGORITHM_HMAC) {
         nm = &njs_webcrypto_alg_name[type][key->hash];
-        (void) njs_vm_value_string_create(vm, njs_value_arg(&alg), nm->start,
-                                          nm->length);
+        (void) njs_vm_value_string_set(vm, &alg, nm->start, nm->length);
 
     } else {
-        switch (key->u.s.raw.length) {
+        switch (key->raw.length) {
         case 16:
         case 24:
         case 32:
             nm = &njs_webcrypto_alg_aes_name
-                 [type - NJS_ALGORITHM_AES_GCM][(key->u.s.raw.length - 16) / 8];
-            (void) njs_vm_value_string_create(vm, njs_value_arg(&alg),
-                                              nm->start, nm->length);
+                    [type - NJS_ALGORITHM_AES_GCM][(key->raw.length - 16) / 8];
+            (void) njs_vm_value_string_set(vm, &alg, nm->start, nm->length);
             break;
 
         default:
-            njs_value_undefined_set(njs_value_arg(&alg));
+            njs_value_undefined_set(&alg);
             break;
         }
     }
 
-    ret = njs_key_ops(vm, njs_value_arg(&ops), key->usage);
+    ret = njs_key_ops(vm, &ops, key->usage);
     if (njs_slow_path(ret != NJS_OK)) {
         return NJS_ERROR;
     }
 
-    njs_value_boolean_set(njs_value_arg(&extractable), key->extractable);
+    njs_value_boolean_set(&extractable, key->extractable);
 
-    ret = njs_vm_object_alloc(vm, retval, NULL);
+    ret = njs_vm_object_alloc(vm, retval, &string_kty, &oct_str, &string_k,
+                               &k, &key_ops, &ops, &string_ext, &extractable,
+                               NULL);
     if (njs_slow_path(ret != NJS_OK)) {
         return NJS_ERROR;
     }
 
-    njs_vm_value_string_create(vm, njs_value_arg(&oct_s), (u_char *) "oct", 3);
-
-    ret = njs_vm_object_prop_set(vm, retval, &string_kty, &oct_s);
-    if (ret != NJS_OK) {
-        return NJS_ERROR;
-    }
-
-    ret = njs_vm_object_prop_set(vm, retval, &string_k, &k);
-    if (ret != NJS_OK) {
-        return NJS_ERROR;
-    }
-
-    ret = njs_vm_object_prop_set(vm, retval, &key_ops, &ops);
-    if (ret != NJS_OK) {
-        return NJS_ERROR;
-    }
-
-    ret = njs_vm_object_prop_set(vm, retval, &string_ext, &extractable);
-    if (ret != NJS_OK) {
-        return NJS_ERROR;
-    }
-
-    if (!njs_value_is_undefined(njs_value_arg(&alg))) {
-        ret = njs_vm_object_prop_set(vm, retval, &string_alg, &alg);
+    if (njs_is_defined(&alg)) {
+        ret = njs_value_property_set(vm, retval, njs_value_arg(&string_alg),
+                                     &alg);
         if (njs_slow_path(ret != NJS_OK)) {
             return NJS_ERROR;
         }
@@ -2415,14 +2133,14 @@ njs_export_jwk_oct(njs_vm_t *vm, njs_webcrypto_key_t *key, njs_value_t *retval)
 
 static njs_int_t
 njs_ext_export_key(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+    njs_index_t unused)
 {
     BIO                         *bio;
     BUF_MEM                     *mem;
     njs_int_t                   ret;
+    njs_value_t                 value;
     njs_webcrypto_key_t         *key;
     PKCS8_PRIV_KEY_INFO         *pkcs8;
-    njs_opaque_value_t          value;
     njs_webcrypto_key_format_t  fmt;
 
     fmt = njs_key_format(vm, njs_arg(args, nargs, 1));
@@ -2433,19 +2151,19 @@ njs_ext_export_key(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
     key = njs_vm_external(vm, njs_webcrypto_crypto_key_proto_id,
                           njs_arg(args, nargs, 2));
     if (njs_slow_path(key == NULL)) {
-        njs_vm_type_error(vm, "\"key\" is not a CryptoKey object");
+        njs_type_error(vm, "\"key\" is not a CryptoKey object");
         goto fail;
     }
 
     if (njs_slow_path(!(fmt & key->alg->fmt))) {
-        njs_vm_type_error(vm, "unsupported key fmt \"%V\" for \"%V\" key",
-                          njs_format_string(fmt),
-                          njs_algorithm_string(key->alg));
+        njs_type_error(vm, "unsupported key fmt \"%V\" for \"%V\" key",
+                       njs_format_string(fmt),
+                       njs_algorithm_string(key->alg));
         goto fail;
     }
 
     if (njs_slow_path(!key->extractable)) {
-        njs_vm_type_error(vm, "provided key cannot be extracted");
+        njs_type_error(vm, "provided key cannot be extracted");
         goto fail;
     }
 
@@ -2456,8 +2174,7 @@ njs_ext_export_key(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
         case NJS_ALGORITHM_RSA_PSS:
         case NJS_ALGORITHM_RSA_OAEP:
         case NJS_ALGORITHM_ECDSA:
-        case NJS_ALGORITHM_ECDH:
-            ret = njs_export_jwk_asymmetric(vm, key, njs_value_arg(&value));
+            ret = njs_export_jwk_asymmetric(vm, key, &value);
             if (njs_slow_path(ret != NJS_OK)) {
                 goto fail;
             }
@@ -2468,7 +2185,7 @@ njs_ext_export_key(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
         case NJS_ALGORITHM_AES_CTR:
         case NJS_ALGORITHM_AES_CBC:
         case NJS_ALGORITHM_HMAC:
-            ret = njs_export_jwk_oct(vm, key, njs_value_arg(&value));
+            ret = njs_export_jwk_oct(vm, key, &value);
             if (njs_slow_path(ret != NJS_OK)) {
                 goto fail;
             }
@@ -2482,9 +2199,9 @@ njs_ext_export_key(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
         break;
 
     case NJS_KEY_FORMAT_PKCS8:
-        if (!key->u.a.privat) {
-            njs_vm_type_error(vm, "public key of \"%V\" cannot be exported "
-                              "as PKCS8", njs_algorithm_string(key->alg));
+        if (!key->privat) {
+            njs_type_error(vm, "public key of \"%V\" cannot be exported "
+                           "as PKCS8", njs_algorithm_string(key->alg));
             goto fail;
         }
 
@@ -2494,9 +2211,9 @@ njs_ext_export_key(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
             goto fail;
         }
 
-        njs_assert(key->u.a.pkey != NULL);
+        njs_assert(key->pkey != NULL);
 
-        pkcs8 = EVP_PKEY2PKCS8(key->u.a.pkey);
+        pkcs8 = EVP_PKEY2PKCS8(key->pkey);
         if (njs_slow_path(pkcs8 == NULL)) {
             BIO_free(bio);
             njs_webcrypto_error(vm, "EVP_PKEY2PKCS8() failed");
@@ -2512,8 +2229,8 @@ njs_ext_export_key(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
 
         BIO_get_mem_ptr(bio, &mem);
 
-        ret = njs_webcrypto_array_buffer(vm, njs_value_arg(&value),
-                                         (u_char *) mem->data, mem->length);
+        ret = njs_webcrypto_array_buffer(vm, &value, (u_char *) mem->data,
+                                         mem->length);
 
         BIO_free(bio);
         PKCS8_PRIV_KEY_INFO_free(pkcs8);
@@ -2525,9 +2242,9 @@ njs_ext_export_key(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
         break;
 
     case NJS_KEY_FORMAT_SPKI:
-        if (key->u.a.privat) {
-            njs_vm_type_error(vm, "private key of \"%V\" cannot be exported "
-                              "as SPKI", njs_algorithm_string(key->alg));
+        if (key->privat) {
+            njs_type_error(vm, "private key of \"%V\" cannot be exported "
+                           "as SPKI", njs_algorithm_string(key->alg));
             goto fail;
         }
 
@@ -2537,9 +2254,9 @@ njs_ext_export_key(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
             goto fail;
         }
 
-        njs_assert(key->u.a.pkey != NULL);
+        njs_assert(key->pkey != NULL);
 
-        if (!i2d_PUBKEY_bio(bio, key->u.a.pkey)) {
+        if (!i2d_PUBKEY_bio(bio, key->pkey)) {
             BIO_free(bio);
             njs_webcrypto_error(vm, "i2d_PUBKEY_bio() failed");
             goto fail;
@@ -2547,8 +2264,8 @@ njs_ext_export_key(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
 
         BIO_get_mem_ptr(bio, &mem);
 
-        ret = njs_webcrypto_array_buffer(vm, njs_value_arg(&value),
-                                         (u_char *) mem->data, mem->length);
+        ret = njs_webcrypto_array_buffer(vm, &value, (u_char *) mem->data,
+                                         mem->length);
 
         BIO_free(bio);
 
@@ -2560,10 +2277,8 @@ njs_ext_export_key(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
 
     case NJS_KEY_FORMAT_RAW:
     default:
-        if (key->alg->type == NJS_ALGORITHM_ECDSA
-            || key->alg->type == NJS_ALGORITHM_ECDH)
-        {
-            ret = njs_export_raw_ec(vm, key, njs_value_arg(&value));
+        if (key->alg->type == NJS_ALGORITHM_ECDSA) {
+            ret = njs_export_raw_ec(vm, key, &value);
             if (njs_slow_path(ret != NJS_OK)) {
                 goto fail;
             }
@@ -2571,9 +2286,8 @@ njs_ext_export_key(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
             break;
         }
 
-        ret = njs_vm_value_array_buffer_set(vm, njs_value_arg(&value),
-                                            key->u.s.raw.start,
-                                            key->u.s.raw.length);
+        ret = njs_vm_value_array_buffer_set(vm, &value, key->raw.start,
+                                            key->raw.length);
         if (njs_slow_path(ret != NJS_OK)) {
             goto fail;
         }
@@ -2581,29 +2295,30 @@ njs_ext_export_key(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
         break;
     }
 
-    return njs_webcrypto_result(vm, &value, NJS_OK, retval);
+    return njs_webcrypto_result(vm, &value, NJS_OK);
 
 fail:
 
-    return njs_webcrypto_result(vm, NULL, NJS_ERROR, retval);
+    return njs_webcrypto_result(vm, njs_vm_retval(vm), NJS_ERROR);
 }
 
 
 static njs_int_t
 njs_ext_generate_key(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+    njs_index_t unused)
 {
+    int                        nid;
     unsigned                   usage;
     njs_int_t                  ret;
     njs_bool_t                 extractable;
-    njs_value_t                *aobject, *val;
+    njs_value_t                value, pub, priv, *aobject;
     EVP_PKEY_CTX               *ctx;
     njs_webcrypto_key_t        *key, *keypub;
-    njs_opaque_value_t         value, pub, priv;
     njs_webcrypto_algorithm_t  *alg;
 
-    static const njs_str_t  string_priv = njs_str("privateKey");
-    static const njs_str_t  string_pub = njs_str("publicKey");
+    static const njs_value_t  string_ml = njs_string("modulusLength");
+    static const njs_value_t  string_priv = njs_string("privateKey");
+    static const njs_value_t  string_pub = njs_string("publicKey");
 
     ctx = NULL;
 
@@ -2626,8 +2341,8 @@ njs_ext_generate_key(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
     }
 
     if (njs_slow_path(usage & ~alg->usage)) {
-        njs_vm_type_error(vm, "unsupported key usage for \"%V\" key",
-                          njs_algorithm_string(alg));
+        njs_type_error(vm, "unsupported key usage for \"%V\" key",
+                       njs_algorithm_string(alg));
         goto fail;
     }
 
@@ -2640,13 +2355,14 @@ njs_ext_generate_key(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
             goto fail;
         }
 
-        val = njs_vm_object_prop(vm, aobject, &string_ml, &value);
-        if (njs_slow_path(val == NULL)) {
+        ret = njs_value_property(vm, aobject, njs_value_arg(&string_ml),
+                                 &value);
+        if (njs_slow_path(ret == NJS_ERROR)) {
             goto fail;
         }
 
-        if (!njs_value_is_number(val)) {
-            njs_vm_type_error(vm, "\"modulusLength\" is not a number");
+        if (!njs_is_number(&value)) {
+            njs_type_error(vm, "\"modulusLength\" is not a number");
             goto fail;
         }
 
@@ -2661,13 +2377,13 @@ njs_ext_generate_key(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
             goto fail;
         }
 
-        if (EVP_PKEY_CTX_set_rsa_keygen_bits(ctx, njs_value_number(val)) <= 0) {
+        if (EVP_PKEY_CTX_set_rsa_keygen_bits(ctx, njs_number(&value)) <= 0) {
             njs_webcrypto_error(vm, "EVP_PKEY_CTX_set_rsa_keygen_bits() "
                                 "failed");
             goto fail;
         }
 
-        if (EVP_PKEY_keygen(ctx, &key->u.a.pkey) <= 0) {
+        if (EVP_PKEY_keygen(ctx, &key->pkey) <= 0) {
             njs_webcrypto_error(vm, "EVP_PKEY_keygen() failed");
             goto fail;
         }
@@ -2675,7 +2391,7 @@ njs_ext_generate_key(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
         EVP_PKEY_CTX_free(ctx);
         ctx = NULL;
 
-        key->u.a.privat = 1;
+        key->privat = 1;
         key->usage = (alg->type == NJS_ALGORITHM_RSA_OAEP)
                         ? NJS_KEY_USAGE_DECRYPT
                         : NJS_KEY_USAGE_SIGN;
@@ -2685,42 +2401,31 @@ njs_ext_generate_key(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
             goto fail;
         }
 
-        if (njs_pkey_up_ref(key->u.a.pkey) <= 0) {
+        if (njs_pkey_up_ref(key->pkey) <= 0) {
             njs_webcrypto_error(vm, "njs_pkey_up_ref() failed");
             goto fail;
         }
 
-        keypub->u.a.pkey = key->u.a.pkey;
+        keypub->pkey = key->pkey;
         keypub->hash = key->hash;
         keypub->usage = (alg->type == NJS_ALGORITHM_RSA_OAEP)
                           ? NJS_KEY_USAGE_ENCRYPT
                           : NJS_KEY_USAGE_VERIFY;
 
-        ret = njs_vm_external_create(vm, njs_value_arg(&priv),
+        ret = njs_vm_external_create(vm, &priv,
                                      njs_webcrypto_crypto_key_proto_id, key, 0);
         if (njs_slow_path(ret != NJS_OK)) {
             goto fail;
         }
 
-        ret = njs_vm_external_create(vm, njs_value_arg(&pub),
+        ret = njs_vm_external_create(vm, &pub,
                                   njs_webcrypto_crypto_key_proto_id, keypub, 0);
         if (njs_slow_path(ret != NJS_OK)) {
             goto fail;
         }
 
-        ret = njs_vm_object_alloc(vm, njs_value_arg(&value), NULL);
-        if (ret != NJS_OK) {
-            goto fail;
-        }
-
-        ret = njs_vm_object_prop_set(vm, njs_value_arg(&value), &string_priv,
-                                     &priv);
-        if (ret != NJS_OK) {
-            goto fail;
-        }
-
-        ret = njs_vm_object_prop_set(vm, njs_value_arg(&value), &string_pub,
-                                     &pub);
+        ret = njs_vm_object_alloc(vm, &value, &string_priv, &priv, &string_pub,
+                                  &pub, NULL);
         if (ret != NJS_OK) {
             goto fail;
         }
@@ -2728,8 +2433,8 @@ njs_ext_generate_key(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
         break;
 
     case NJS_ALGORITHM_ECDSA:
-    case NJS_ALGORITHM_ECDH:
-        ret = njs_algorithm_curve(vm, aobject, &key->u.a.curve);
+        nid = 0;
+        ret = njs_algorithm_curve(vm, aobject, &nid);
         if (njs_slow_path(ret == NJS_ERROR)) {
             goto fail;
         }
@@ -2745,13 +2450,13 @@ njs_ext_generate_key(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
             goto fail;
         }
 
-        if (EVP_PKEY_CTX_set_ec_paramgen_curve_nid(ctx, key->u.a.curve) <= 0) {
+        if (EVP_PKEY_CTX_set_ec_paramgen_curve_nid(ctx, nid) <= 0) {
             njs_webcrypto_error(vm, "EVP_PKEY_CTX_set_ec_paramgen_curve_nid() "
                                 "failed");
             goto fail;
         }
 
-        if (EVP_PKEY_keygen(ctx, &key->u.a.pkey) <= 0) {
+        if (EVP_PKEY_keygen(ctx, &key->pkey) <= 0) {
             njs_webcrypto_error(vm, "EVP_PKEY_keygen() failed");
             goto fail;
         }
@@ -2759,63 +2464,37 @@ njs_ext_generate_key(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
         EVP_PKEY_CTX_free(ctx);
         ctx = NULL;
 
-        key->u.a.privat = 1;
-
-        if (alg->type == NJS_ALGORITHM_ECDSA) {
-            key->usage = NJS_KEY_USAGE_SIGN;
-
-        } else {
-            /* ECDH */
-            key->usage = NJS_KEY_USAGE_DERIVE_KEY | NJS_KEY_USAGE_DERIVE_BITS;
-        }
+        key->privat = 1;
+        key->usage = NJS_KEY_USAGE_SIGN;
 
         keypub = njs_webcrypto_key_alloc(vm, alg, usage, extractable);
         if (njs_slow_path(keypub == NULL)) {
             goto fail;
         }
 
-        if (njs_pkey_up_ref(key->u.a.pkey) <= 0) {
+        if (njs_pkey_up_ref(key->pkey) <= 0) {
             njs_webcrypto_error(vm, "njs_pkey_up_ref() failed");
             goto fail;
         }
 
-        keypub->u.a.pkey = key->u.a.pkey;
-        keypub->u.a.curve = key->u.a.curve;
+        keypub->pkey = key->pkey;
+        keypub->curve = key->curve;
+        keypub->usage = NJS_KEY_USAGE_VERIFY;
 
-        if (alg->type == NJS_ALGORITHM_ECDSA) {
-            keypub->usage = NJS_KEY_USAGE_VERIFY;
-
-        } else {
-            /* ECDH */
-            keypub->usage = NJS_KEY_USAGE_DERIVE_KEY
-                            | NJS_KEY_USAGE_DERIVE_BITS;
-        }
-
-        ret = njs_vm_external_create(vm, njs_value_arg(&priv),
+        ret = njs_vm_external_create(vm, &priv,
                                      njs_webcrypto_crypto_key_proto_id, key, 0);
         if (njs_slow_path(ret != NJS_OK)) {
             goto fail;
         }
 
-        ret = njs_vm_external_create(vm, njs_value_arg(&pub),
+        ret = njs_vm_external_create(vm, &pub,
                                   njs_webcrypto_crypto_key_proto_id, keypub, 0);
         if (njs_slow_path(ret != NJS_OK)) {
             goto fail;
         }
 
-        ret = njs_vm_object_alloc(vm, njs_value_arg(&value), NULL);
-        if (ret != NJS_OK) {
-            goto fail;
-        }
-
-        ret = njs_vm_object_prop_set(vm, njs_value_arg(&value), &string_priv,
-                                     &priv);
-        if (ret != NJS_OK) {
-            goto fail;
-        }
-
-        ret = njs_vm_object_prop_set(vm, njs_value_arg(&value), &string_pub,
-                                     &pub);
+        ret = njs_vm_object_alloc(vm, &value, &string_priv, &priv, &string_pub,
+                                  &pub, NULL);
         if (ret != NJS_OK) {
             goto fail;
         }
@@ -2833,39 +2512,39 @@ njs_ext_generate_key(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
                 goto fail;
             }
 
-            key->u.s.raw.length =
-                              EVP_MD_size(njs_algorithm_hash_digest(key->hash));
+            key->raw.length = EVP_MD_size(njs_algorithm_hash_digest(key->hash));
 
         } else {
-            val = njs_vm_object_prop(vm, aobject, &string_length, &value);
-            if (val != NULL) {
-                key->u.s.raw.length = njs_value_number(val) / 8;
+            ret = njs_value_property(vm, aobject, njs_value_arg(&string_length),
+                                     &value);
+            if (njs_slow_path(ret == NJS_ERROR)) {
+                goto fail;
+            }
 
-                if (key->u.s.raw.length != 16
-                    && key->u.s.raw.length != 24
-                    && key->u.s.raw.length != 32)
-                {
-                    njs_vm_type_error(vm, "length for \"%V\" key should be "
-                                      "one of 128, 192, 256",
-                                      njs_algorithm_string(alg));
-                    goto fail;
-                }
+            key->raw.length = njs_number(&value) / 8;
+
+            if (key->raw.length != 16
+                && key->raw.length != 24
+                && key->raw.length != 32)
+            {
+                njs_type_error(vm, "length for \"%V\" key should be one of "
+                               "128, 192, 256", njs_algorithm_string(alg));
+                goto fail;
             }
         }
 
-        key->u.s.raw.start = njs_mp_alloc(njs_vm_memory_pool(vm),
-                                          key->u.s.raw.length);
-        if (njs_slow_path(key->u.s.raw.start == NULL)) {
-            njs_vm_memory_error(vm);
+        key->raw.start = njs_mp_alloc(njs_vm_memory_pool(vm), key->raw.length);
+        if (njs_slow_path(key->raw.start == NULL)) {
+            njs_memory_error(vm);
             goto fail;
         }
 
-        if (RAND_bytes(key->u.s.raw.start, key->u.s.raw.length) <= 0) {
+        if (RAND_bytes(key->raw.start, key->raw.length) <= 0) {
             njs_webcrypto_error(vm, "RAND_bytes() failed");
             goto fail;
         }
 
-        ret = njs_vm_external_create(vm, njs_value_arg(&value),
+        ret = njs_vm_external_create(vm, &value,
                                      njs_webcrypto_crypto_key_proto_id, key, 0);
         if (njs_slow_path(ret != NJS_OK)) {
             goto fail;
@@ -2874,12 +2553,12 @@ njs_ext_generate_key(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
         break;
 
     default:
-        njs_vm_internal_error(vm, "not implemented generateKey"
-                              "algorithm: \"%V\"", njs_algorithm_string(alg));
+        njs_internal_error(vm, "not implemented generateKey"
+                           "algorithm: \"%V\"", njs_algorithm_string(alg));
         return NJS_ERROR;
     }
 
-    return njs_webcrypto_result(vm, &value, NJS_OK, retval);
+    return njs_webcrypto_result(vm, &value, NJS_OK);
 
 fail:
 
@@ -2887,18 +2566,18 @@ fail:
         EVP_PKEY_CTX_free(ctx);
     }
 
-    return njs_webcrypto_result(vm, NULL, NJS_ERROR, retval);
+    return njs_webcrypto_result(vm, njs_vm_retval(vm), NJS_ERROR);
 }
 
 
 static BIGNUM *
-njs_import_base64url_bignum(njs_vm_t *vm, njs_opaque_value_t *value)
+njs_import_base64url_bignum(njs_vm_t *vm, njs_value_t *value)
 {
     njs_int_t  ret;
     njs_str_t  data, decoded;
     u_char     buf[512];
 
-    ret = njs_vm_value_to_bytes(vm, &data, njs_value_arg(value));
+    ret = njs_vm_value_to_bytes(vm, &data, value);
     if (njs_slow_path(ret != NJS_OK)) {
         return NULL;
     }
@@ -2927,58 +2606,63 @@ njs_import_jwk_rsa(njs_vm_t *vm, njs_value_t *jwk, njs_webcrypto_key_t *key)
     unsigned               usage;
     EVP_PKEY               *pkey;
     njs_int_t              ret;
-    njs_value_t            *val;
-    njs_opaque_value_t     n, e, d, p, q, dp, dq, qi, value;
+    njs_value_t            n, e, d, p, q, dp, dq, qi, value;
     njs_webcrypto_entry_t  *w;
 
-    val = njs_vm_object_prop(vm, jwk, &string_n, &n);
-    if (njs_slow_path(val == NULL)) {
-        goto fail0;
-    }
-
-    val = njs_vm_object_prop(vm, jwk, &string_e, &e);
-    if (njs_slow_path(val == NULL)) {
-        goto fail0;
-    }
-
-    val = njs_vm_object_prop(vm, jwk, &string_d, &d);
-    if (njs_slow_path(val == NULL)) {
-        njs_value_undefined_set(njs_value_arg(&d));
-    }
-
-    if (!njs_value_is_string(njs_value_arg(&n))
-        || !njs_value_is_string(njs_value_arg(&e))
-        || (!njs_value_is_undefined(njs_value_arg(&d))
-            && !njs_value_is_string(njs_value_arg(&d))))
-    {
-fail0:
-        njs_vm_type_error(vm, "Invalid JWK RSA key");
+    ret = njs_value_property(vm, jwk, njs_value_arg(&string_n), &n);
+    if (njs_slow_path(ret == NJS_ERROR)) {
         return NULL;
     }
 
-    key->u.a.privat = njs_value_is_string(njs_value_arg(&d));
+    ret = njs_value_property(vm, jwk, njs_value_arg(&string_e), &e);
+    if (njs_slow_path(ret == NJS_ERROR)) {
+        return NULL;
+    }
 
-    val = njs_vm_object_prop(vm, jwk, &key_ops, &value);
-    if (val != NULL && !njs_value_is_undefined(val)){
-        ret = njs_key_usage(vm, val, &usage);
+    ret = njs_value_property(vm, jwk, njs_value_arg(&string_d), &d);
+    if (njs_slow_path(ret == NJS_ERROR)) {
+        return NULL;
+    }
+
+    if (!njs_value_is_string(&n)
+        || !njs_value_is_string(&e)
+        || (!njs_value_is_undefined(&d) && !njs_value_is_string(&d)))
+    {
+        njs_type_error(vm, "Invalid JWK RSA key");
+        return NULL;
+    }
+
+    key->privat = njs_value_is_string(&d);
+
+    ret = njs_value_property(vm, jwk, njs_value_arg(&key_ops), &value);
+    if (njs_slow_path(ret == NJS_ERROR)) {
+        return NULL;
+    }
+
+    if (njs_is_defined(&value)) {
+        ret = njs_key_usage(vm, &value, &usage);
         if (njs_slow_path(ret != NJS_OK)) {
             return NULL;
         }
 
         if ((key->usage & usage) != key->usage) {
-            njs_vm_type_error(vm, "Key operations and usage mismatch");
+            njs_type_error(vm, "Key operations and usage mismatch");
             return NULL;
         }
     }
 
-    val = njs_vm_object_prop(vm, jwk, &string_alg, &value);
-    if (val != NULL && !njs_value_is_undefined(val)){
-        ret = njs_value_to_string(vm, val, val);
+    ret = njs_value_property(vm, jwk, njs_value_arg(&string_alg), &value);
+    if (njs_slow_path(ret == NJS_ERROR)) {
+        return NULL;
+    }
+
+    if (njs_is_defined(&value)) {
+        ret = njs_value_to_string(vm, &value, &value);
         if (njs_slow_path(ret != NJS_OK)) {
             return NULL;
         }
 
-        njs_value_string_get(vm, val, &alg);
+        njs_string_get(&value, &alg);
 
         for (w = &njs_webcrypto_alg_hash[0]; w->name.length != 0; w++) {
             if (njs_strstr_eq(&alg, &w->name)) {
@@ -2989,12 +2673,13 @@ fail0:
     }
 
     if (key->extractable) {
-        val = njs_vm_object_prop(vm, jwk, &string_ext, &value);
-        if (val != NULL
-            && !njs_value_is_undefined(val)
-            && !njs_value_bool(val))
-        {
-            njs_vm_type_error(vm, "JWK RSA is not extractable");
+        ret = njs_value_property(vm, jwk, njs_value_arg(&string_ext), &value);
+        if (njs_slow_path(ret == NJS_ERROR)) {
+            return NULL;
+        }
+
+        if (njs_is_defined(&value) && !njs_value_bool(&value)) {
+            njs_type_error(vm, "JWK RSA is not extractable");
             return NULL;
         }
     }
@@ -3023,44 +2708,43 @@ fail0:
         goto fail;
     }
 
-    if (!key->u.a.privat) {
+    if (!key->privat) {
         goto done;
     }
 
-    val = njs_vm_object_prop(vm, jwk, &string_p, &p);
-    if (njs_slow_path(val == NULL)) {
-        goto fail1;
+    ret = njs_value_property(vm, jwk, njs_value_arg(&string_p), &p);
+    if (njs_slow_path(ret == NJS_ERROR)) {
+        goto fail;
     }
 
-    val = njs_vm_object_prop(vm, jwk, &string_q, &q);
-    if (njs_slow_path(val == NULL)) {
-        goto fail1;
+    ret = njs_value_property(vm, jwk, njs_value_arg(&string_q), &q);
+    if (njs_slow_path(ret == NJS_ERROR)) {
+        goto fail;
     }
 
-    val = njs_vm_object_prop(vm, jwk, &string_dp, &dp);
-    if (njs_slow_path(val == NULL)) {
-        goto fail1;
+    ret = njs_value_property(vm, jwk, njs_value_arg(&string_dp), &dp);
+    if (njs_slow_path(ret == NJS_ERROR)) {
+        goto fail;
     }
 
-    val = njs_vm_object_prop(vm, jwk, &string_dq, &dq);
-    if (njs_slow_path(val == NULL)) {
-        goto fail1;
+    ret = njs_value_property(vm, jwk, njs_value_arg(&string_dq), &dq);
+    if (njs_slow_path(ret == NJS_ERROR)) {
+        goto fail;
     }
 
-    val = njs_vm_object_prop(vm, jwk, &string_qi, &qi);
-    if (njs_slow_path(val == NULL)) {
-        goto fail1;
+    ret = njs_value_property(vm, jwk, njs_value_arg(&string_qi), &qi);
+    if (njs_slow_path(ret == NJS_ERROR)) {
+        goto fail;
     }
 
-    if (!njs_value_is_string(njs_value_arg(&d))
-        || !njs_value_is_string(njs_value_arg(&p))
-        || !njs_value_is_string(njs_value_arg(&q))
-        || !njs_value_is_string(njs_value_arg(&dp))
-        || !njs_value_is_string(njs_value_arg(&dq))
-        || !njs_value_is_string(njs_value_arg(&qi)))
+    if (!njs_value_is_string(&d)
+        || !njs_value_is_string(&p)
+        || !njs_value_is_string(&q)
+        || !njs_value_is_string(&dp)
+        || !njs_value_is_string(&dq)
+        || !njs_value_is_string(&qi))
     {
-fail1:
-        njs_vm_type_error(vm, "Invalid JWK RSA key");
+        njs_type_error(vm, "Invalid JWK RSA key");
         goto fail;
     }
 
@@ -3153,7 +2837,7 @@ njs_import_raw_ec(njs_vm_t *vm, njs_str_t *data, njs_webcrypto_key_t *key)
     EC_POINT        *pub;
     const EC_GROUP  *group;
 
-    ec = EC_KEY_new_by_curve_name(key->u.a.curve);
+    ec = EC_KEY_new_by_curve_name(key->curve);
     if (njs_slow_path(ec == NULL)) {
         njs_webcrypto_error(vm, "EC_KEY_new_by_curve_name() failed");
         return NULL;
@@ -3215,8 +2899,7 @@ njs_import_jwk_ec(njs_vm_t *vm, njs_value_t *jwk, njs_webcrypto_key_t *key)
     EVP_PKEY               *pkey;
     njs_str_t              name;
     njs_int_t              ret;
-    njs_value_t            *val;
-    njs_opaque_value_t     x, y, d, value;
+    njs_value_t            x, y, d, value;
     njs_webcrypto_entry_t  *e;
 
     ec = NULL;
@@ -3224,77 +2907,81 @@ njs_import_jwk_ec(njs_vm_t *vm, njs_value_t *jwk, njs_webcrypto_key_t *key)
     y_bn = NULL;
     d_bn = NULL;
 
-    val = njs_vm_object_prop(vm, jwk, &string_x, &x);
-    if (njs_slow_path(val == NULL)) {
-        goto fail0;
-    }
-
-    val = njs_vm_object_prop(vm, jwk, &string_y, &y);
-    if (njs_slow_path(val == NULL)) {
-        goto fail0;
-    }
-
-    val = njs_vm_object_prop(vm, jwk, &string_d, &d);
-    if (njs_slow_path(val == NULL)) {
-        njs_value_undefined_set(njs_value_arg(&d));
-    }
-
-    if (!njs_value_is_string(njs_value_arg(&x))
-        || !njs_value_is_string(njs_value_arg(&y))
-        || (!njs_value_is_undefined(njs_value_arg(&d))
-            && !njs_value_is_string(njs_value_arg(&d))))
-    {
-fail0:
-        njs_vm_type_error(vm, "Invalid JWK EC key");
+    ret = njs_value_property(vm, jwk, njs_value_arg(&string_x), &x);
+    if (njs_slow_path(ret == NJS_ERROR)) {
         return NULL;
     }
 
-    key->u.a.privat = njs_value_is_string(njs_value_arg(&d));
+    ret = njs_value_property(vm, jwk, njs_value_arg(&string_y), &y);
+    if (njs_slow_path(ret == NJS_ERROR)) {
+        return NULL;
+    }
 
-    val = njs_vm_object_prop(vm, jwk, &key_ops, &value);
-    if (val != NULL && !njs_value_is_undefined(val)) {
-        ret = njs_key_usage(vm, val, &usage);
+    ret = njs_value_property(vm, jwk, njs_value_arg(&string_d), &d);
+    if (njs_slow_path(ret == NJS_ERROR)) {
+        return NULL;
+    }
+
+    if (!njs_value_is_string(&x)
+        || !njs_value_is_string(&y)
+        || (!njs_value_is_undefined(&d) && !njs_value_is_string(&d)))
+    {
+        njs_type_error(vm, "Invalid JWK EC key");
+        return NULL;
+    }
+
+    key->privat = njs_value_is_string(&d);
+
+    ret = njs_value_property(vm, jwk, njs_value_arg(&key_ops), &value);
+    if (njs_slow_path(ret == NJS_ERROR)) {
+        return NULL;
+    }
+
+    if (njs_is_defined(&value)) {
+        ret = njs_key_usage(vm, &value, &usage);
         if (njs_slow_path(ret != NJS_OK)) {
             return NULL;
         }
 
         if ((key->usage & usage) != key->usage) {
-            njs_vm_type_error(vm, "Key operations and usage mismatch");
+            njs_type_error(vm, "Key operations and usage mismatch");
             return NULL;
         }
     }
 
     if (key->extractable) {
-        val = njs_vm_object_prop(vm, jwk, &string_ext, &value);
-        if (val != NULL
-            && !njs_value_is_undefined(val)
-            && !njs_value_bool(val))
-        {
-            njs_vm_type_error(vm, "JWK EC is not extractable");
+        ret = njs_value_property(vm, jwk, njs_value_arg(&string_ext), &value);
+        if (njs_slow_path(ret == NJS_ERROR)) {
+            return NULL;
+        }
+
+        if (njs_is_defined(&value) && !njs_value_bool(&value)) {
+            njs_type_error(vm, "JWK EC is not extractable");
             return NULL;
         }
     }
 
-    curve = 0;
-
-    val = njs_vm_object_prop(vm, jwk, &string_crv, &value);
-    if (val != NULL && !njs_value_is_undefined(val)) {
-        njs_value_string_get(vm, val, &name);
-
-        for (e = &njs_webcrypto_curve[0]; e->name.length != 0; e++) {
-            if (njs_strstr_eq(&name, &e->name)) {
-                curve = e->value;
-                break;
-            }
-        }
-    }
-
-    if (curve != key->u.a.curve) {
-        njs_vm_type_error(vm, "JWK EC curve mismatch");
+    ret = njs_value_property(vm, jwk, njs_value_arg(&string_crv), &value);
+    if (njs_slow_path(ret == NJS_ERROR)) {
         return NULL;
     }
 
-    ec = EC_KEY_new_by_curve_name(key->u.a.curve);
+    curve = 0;
+    njs_string_get(&value, &name);
+
+    for (e = &njs_webcrypto_curve[0]; e->name.length != 0; e++) {
+        if (njs_strstr_eq(&name, &e->name)) {
+            curve = e->value;
+            break;
+        }
+    }
+
+    if (curve != key->curve) {
+        njs_type_error(vm, "JWK EC curve mismatch");
+        return NULL;
+    }
+
+    ec = EC_KEY_new_by_curve_name(key->curve);
     if (njs_slow_path(ec == NULL)) {
         njs_webcrypto_error(vm, "EC_KEY_new_by_curve_name() failed");
         return NULL;
@@ -3310,7 +2997,7 @@ fail0:
         goto fail;
     }
 
-    if (key->u.a.privat) {
+    if (key->privat) {
         d_bn = njs_import_base64url_bignum(vm, &d);
         if (njs_slow_path(d_bn == NULL)) {
             goto fail;
@@ -3339,7 +3026,7 @@ fail0:
         goto fail_pkey;
     }
 
-    if (key->u.a.privat) {
+    if (key->privat) {
         if (!EC_KEY_set_private_key(ec, d_bn)) {
             njs_webcrypto_error(vm, "EC_KEY_set_private_key() failed");
             goto fail_pkey;
@@ -3386,8 +3073,7 @@ njs_import_jwk_oct(njs_vm_t *vm, njs_value_t *jwk, njs_webcrypto_key_t *key)
     unsigned               usage;
     njs_int_t              ret;
     njs_str_t              *a, alg, b64;
-    njs_value_t            *val;
-    njs_opaque_value_t     value;
+    njs_value_t            value;
     njs_webcrypto_alg_t    type;
     njs_webcrypto_entry_t  *w;
 
@@ -3399,89 +3085,97 @@ njs_import_jwk_oct(njs_vm_t *vm, njs_value_t *jwk, njs_webcrypto_key_t *key)
         { njs_null_str, 0 }
     };
 
-    val = njs_vm_object_prop(vm, jwk, &string_k, &value);
-    if (njs_slow_path(val == NULL || !njs_value_is_string(val))) {
-        njs_vm_type_error(vm, "Invalid JWK oct key");
+    ret = njs_value_property(vm, jwk, njs_value_arg(&string_k), &value);
+    if (njs_slow_path(ret == NJS_ERROR)) {
         return NJS_ERROR;
     }
 
-    njs_value_string_get(vm, val, &b64);
-
-    (void) njs_decode_base64url_length(&b64, &key->u.s.raw.length);
-
-    key->u.s.raw.start = njs_mp_alloc(njs_vm_memory_pool(vm),
-                                      key->u.s.raw.length);
-    if (njs_slow_path(key->u.s.raw.start == NULL)) {
-        njs_vm_memory_error(vm);
+    if (!njs_value_is_string(&value)) {
+        njs_type_error(vm, "Invalid JWK oct key");
         return NJS_ERROR;
     }
 
-    njs_decode_base64url(&key->u.s.raw, &b64);
+    njs_string_get(&value, &b64);
 
-    val = njs_vm_object_prop(vm, jwk, &string_alg, &value);
-    if (njs_slow_path(val == NULL || !njs_value_is_string(val))) {
-        njs_vm_type_error(vm, "Invalid JWK oct alg");
+    (void) njs_decode_base64url_length(&b64, &key->raw.length);
+
+    key->raw.start = njs_mp_alloc(njs_vm_memory_pool(vm), key->raw.length);
+    if (njs_slow_path(key->raw.start == NULL)) {
+        njs_memory_error(vm);
         return NJS_ERROR;
     }
 
-    njs_value_string_get(vm, val, &alg);
+    njs_decode_base64url(&key->raw, &b64);
+
+    ret = njs_value_property(vm, jwk, njs_value_arg(&string_alg), &value);
+    if (njs_slow_path(ret == NJS_ERROR)) {
+        return NJS_ERROR;
+    }
 
     size = 16;
 
-    if (key->alg->type == NJS_ALGORITHM_HMAC) {
-        for (w = &hashes[0]; w->name.length != 0; w++) {
-            if (njs_strstr_eq(&alg, &w->name)) {
-                key->hash = w->value;
-                goto done;
+    if (njs_value_is_string(&value)) {
+        njs_string_get(&value, &alg);
+
+        if (key->alg->type == NJS_ALGORITHM_HMAC) {
+            for (w = &hashes[0]; w->name.length != 0; w++) {
+                if (njs_strstr_eq(&alg, &w->name)) {
+                    key->hash = w->value;
+                    goto done;
+                }
+            }
+
+        } else {
+            type = key->alg->type;
+            a = &njs_webcrypto_alg_aes_name[type - NJS_ALGORITHM_AES_GCM][0];
+            for (; a->length != 0; a++) {
+                if (njs_strstr_eq(&alg, a)) {
+                    goto done;
+                }
+
+                size += 8;
             }
         }
 
-    } else {
-        type = key->alg->type;
-        a = &njs_webcrypto_alg_aes_name[type - NJS_ALGORITHM_AES_GCM][0];
-        for (; a->length != 0; a++) {
-            if (njs_strstr_eq(&alg, a)) {
-                goto done;
-            }
-
-            size += 8;
-        }
+        njs_type_error(vm, "unexpected \"alg\" value \"%V\" for JWK key", &alg);
+        return NJS_ERROR;
     }
-
-    njs_vm_type_error(vm, "unexpected \"alg\" value \"%V\" for JWK key",
-                      &alg);
-    return NJS_ERROR;
 
 done:
 
     if (key->alg->type != NJS_ALGORITHM_HMAC) {
-        if (key->u.s.raw.length != size) {
-            njs_vm_type_error(vm, "key size and \"alg\" value \"%V\" mismatch",
-                              &alg);
+        if (key->raw.length != size) {
+            njs_type_error(vm, "key size and \"alg\" value \"%V\" mismatch",
+                           &alg);
             return NJS_ERROR;
         }
     }
 
-    val = njs_vm_object_prop(vm, jwk, &key_ops, &value);
-    if (val != NULL && !njs_value_is_undefined(val)) {
-        ret = njs_key_usage(vm, val, &usage);
+    ret = njs_value_property(vm, jwk, njs_value_arg(&key_ops), &value);
+    if (njs_slow_path(ret == NJS_ERROR)) {
+        return NJS_ERROR;
+    }
+
+    if (njs_is_defined(&value)) {
+        ret = njs_key_usage(vm, &value, &usage);
         if (njs_slow_path(ret != NJS_OK)) {
             return NJS_ERROR;
         }
 
         if ((key->usage & usage) != key->usage) {
-            njs_vm_type_error(vm, "Key operations and usage mismatch");
+            njs_type_error(vm, "Key operations and usage mismatch");
             return NJS_ERROR;
         }
     }
 
     if (key->extractable) {
-        val = njs_vm_object_prop(vm, jwk, &string_ext, &value);
-        if (val != NULL
-            && !njs_value_is_undefined(val)
-            && !njs_value_bool(val))
-        {
-            njs_vm_type_error(vm, "JWK oct is not extractable");
+        ret = njs_value_property(vm, jwk, njs_value_arg(&string_ext), &value);
+        if (njs_slow_path(ret == NJS_ERROR)) {
+            return NJS_ERROR;
+        }
+
+        if (njs_is_defined(&value) && !njs_value_bool(&value)) {
+            njs_type_error(vm, "JWK oct is not extractable");
             return NJS_ERROR;
         }
     }
@@ -3492,7 +3186,7 @@ done:
 
 static njs_int_t
 njs_ext_import_key(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+    njs_index_t unused)
 {
     int                         nid;
     BIO                         *bio;
@@ -3506,14 +3200,13 @@ njs_ext_import_key(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
     EVP_PKEY                    *pkey;
     njs_int_t                   ret;
     njs_str_t                   key_data, kty;
-    njs_value_t                 *options, *jwk, *val;
+    njs_value_t                 value, *options, *jwk;
     const u_char                *start;
 #if (OPENSSL_VERSION_NUMBER < 0x30000000L)
     const EC_GROUP              *group;
 #endif
     njs_webcrypto_key_t         *key;
     PKCS8_PRIV_KEY_INFO         *pkcs8;
-    njs_opaque_value_t          value;
     njs_webcrypto_hash_t        hash;
     njs_webcrypto_algorithm_t   *alg;
     njs_webcrypto_key_format_t  fmt;
@@ -3534,9 +3227,9 @@ njs_ext_import_key(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
     }
 
     if (njs_slow_path(!(fmt & alg->fmt))) {
-        njs_vm_type_error(vm, "unsupported key fmt \"%V\" for \"%V\" key",
-                          njs_format_string(fmt),
-                          njs_algorithm_string(alg));
+        njs_type_error(vm, "unsupported key fmt \"%V\" for \"%V\" key",
+                       njs_format_string(fmt),
+                       njs_algorithm_string(alg));
         goto fail;
     }
 
@@ -3546,8 +3239,8 @@ njs_ext_import_key(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
     }
 
     if (njs_slow_path(usage & ~alg->usage)) {
-        njs_vm_type_error(vm, "unsupported key usage for \"%V\" key",
-                          njs_algorithm_string(alg));
+        njs_type_error(vm, "unsupported key usage for \"%V\" key",
+                       njs_algorithm_string(alg));
         goto fail;
     }
 
@@ -3567,11 +3260,11 @@ njs_ext_import_key(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
     /*
      * set by njs_webcrypto_key_alloc():
      *
-     *  key->u.a.pkey = NULL;
-     *  key->u.s.raw.length = 0;
-     *  key->u.s.raw.start = NULL;
-     *  key->u.a.curve = 0;
-     *  key->u.a.privat = 0;
+     *  key->pkey = NULL;
+     *  key->raw.length = 0;
+     *  key->raw.start = NULL;
+     *  key->curve = 0;
+     *  key->privat = 0;
      *  key->hash = NJS_HASH_UNSET;
      */
 
@@ -3601,7 +3294,7 @@ njs_ext_import_key(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
         PKCS8_PRIV_KEY_INFO_free(pkcs8);
         BIO_free(bio);
 
-        key->u.a.privat = 1;
+        key->privat = 1;
 
         break;
 
@@ -3618,17 +3311,16 @@ njs_ext_import_key(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
     case NJS_KEY_FORMAT_JWK:
         jwk = njs_arg(args, nargs, 2);
         if (!njs_value_is_object(jwk)) {
-            njs_vm_type_error(vm, "invalid JWK key data: object value "
-                              "expected");
+            njs_type_error(vm, "invalid JWK key data: object value expected");
             goto fail;
         }
 
-        val = njs_vm_object_prop(vm, jwk, &string_kty, &value);
-        if (njs_slow_path(val == NULL)) {
-            val = njs_value_arg(&njs_value_undefined);
+        ret = njs_value_property(vm, jwk, njs_value_arg(&string_kty), &value);
+        if (njs_slow_path(ret == NJS_ERROR)) {
+            goto fail;
         }
 
-        ret = njs_vm_value_to_bytes(vm, &kty, val);
+        ret = njs_vm_value_to_bytes(vm, &kty, &value);
         if (njs_slow_path(ret != NJS_OK)) {
             goto fail;
         }
@@ -3640,7 +3332,7 @@ njs_ext_import_key(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
             }
 
         } else if (njs_strstr_eq(&kty, &njs_str_value("EC"))) {
-            ret = njs_algorithm_curve(vm, options, &key->u.a.curve);
+            ret = njs_algorithm_curve(vm, options, &key->curve);
             if (njs_slow_path(ret == NJS_ERROR)) {
                 goto fail;
             }
@@ -3657,7 +3349,7 @@ njs_ext_import_key(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
             }
 
         } else {
-            njs_vm_type_error(vm, "invalid JWK key type: %V", &kty);
+            njs_type_error(vm, "invalid JWK key type: %V", &kty);
             goto fail;
         }
 
@@ -3696,11 +3388,11 @@ njs_ext_import_key(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
         }
 
         if (key->hash != NJS_HASH_UNSET && key->hash != hash) {
-            njs_vm_type_error(vm, "RSA JWK hash mismatch");
+            njs_type_error(vm, "RSA JWK hash mismatch");
             goto fail;
         }
 
-        if (key->u.a.privat) {
+        if (key->privat) {
             mask = (alg->type == NJS_ALGORITHM_RSA_OAEP)
                          ? ~(NJS_KEY_USAGE_DECRYPT | NJS_KEY_USAGE_UNWRAP_KEY)
                          : ~(NJS_KEY_USAGE_SIGN);
@@ -3711,19 +3403,19 @@ njs_ext_import_key(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
         }
 
         if (key->usage & mask) {
-            njs_vm_type_error(vm, "key usage mismatch for \"%V\" key",
-                              njs_algorithm_string(alg));
+            njs_type_error(vm, "key usage mismatch for \"%V\" key",
+                           njs_algorithm_string(alg));
             goto fail;
         }
 
         key->hash = hash;
-        key->u.a.pkey = pkey;
+        key->pkey = pkey;
 
         break;
 
     case NJS_ALGORITHM_ECDSA:
     case NJS_ALGORITHM_ECDH:
-        ret = njs_algorithm_curve(vm, options, &key->u.a.curve);
+        ret = njs_algorithm_curve(vm, options, &key->curve);
         if (njs_slow_path(ret == NJS_ERROR)) {
             goto fail;
         }
@@ -3763,30 +3455,20 @@ njs_ext_import_key(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
 
 #endif
 
-        if (njs_slow_path(key->u.a.curve != nid)) {
+        if (njs_slow_path(key->curve != nid)) {
             njs_webcrypto_error(vm, "name curve mismatch");
             goto fail;
         }
 
-        if (alg->type == NJS_ALGORITHM_ECDSA) {
-            mask = key->u.a.privat ? ~NJS_KEY_USAGE_SIGN
-                                   : ~NJS_KEY_USAGE_VERIFY;
-        } else {
-            if (key->u.a.privat) {
-                mask = ~(NJS_KEY_USAGE_DERIVE_KEY | NJS_KEY_USAGE_DERIVE_BITS);
-
-            } else {
-                mask = 0;
-            }
-        }
+        mask = key->privat ? ~NJS_KEY_USAGE_SIGN : ~NJS_KEY_USAGE_VERIFY;
 
         if (key->usage & mask) {
-            njs_vm_type_error(vm, "key usage mismatch for \"%V\" key",
-                              njs_algorithm_string(alg));
+            njs_type_error(vm, "key usage mismatch for \"%V\" key",
+                           njs_algorithm_string(alg));
             goto fail;
         }
 
-        key->u.a.pkey = pkey;
+        key->pkey = pkey;
 
         break;
 
@@ -3797,7 +3479,7 @@ njs_ext_import_key(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
                 goto fail;
             }
 
-            key->u.s.raw = key_data;
+            key->raw = key_data;
 
         } else {
             /* NJS_KEY_FORMAT_JWK. */
@@ -3808,7 +3490,7 @@ njs_ext_import_key(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
             }
 
             if (key->hash != NJS_HASH_UNSET && key->hash != hash) {
-                njs_vm_type_error(vm, "HMAC JWK hash mismatch");
+                njs_type_error(vm, "HMAC JWK hash mismatch");
                 goto fail;
             }
         }
@@ -3826,11 +3508,11 @@ njs_ext_import_key(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
                 break;
 
             default:
-                njs_vm_type_error(vm, "AES Invalid key length");
+                njs_type_error(vm, "AES Invalid key length");
                 goto fail;
             }
 
-            key->u.s.raw = key_data;
+            key->raw = key_data;
         }
 
         break;
@@ -3838,17 +3520,17 @@ njs_ext_import_key(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
     case NJS_ALGORITHM_PBKDF2:
     case NJS_ALGORITHM_HKDF:
     default:
-        key->u.s.raw = key_data;
+        key->raw = key_data;
         break;
     }
 
-    ret = njs_vm_external_create(vm, njs_value_arg(&value),
-                                 njs_webcrypto_crypto_key_proto_id, key, 0);
+    ret = njs_vm_external_create(vm, &value, njs_webcrypto_crypto_key_proto_id,
+                                 key, 0);
     if (njs_slow_path(ret != NJS_OK)) {
         goto fail;
     }
 
-    return njs_webcrypto_result(vm, &value, NJS_OK, retval);
+    return njs_webcrypto_result(vm, &value, NJS_OK);
 
 fail:
 
@@ -3856,7 +3538,7 @@ fail:
         EVP_PKEY_free(pkey);
     }
 
-    return njs_webcrypto_result(vm, NULL, NJS_ERROR, retval);
+    return njs_webcrypto_result(vm, njs_vm_retval(vm), NJS_ERROR);
 }
 
 
@@ -3864,13 +3546,12 @@ static njs_int_t
 njs_set_rsa_padding(njs_vm_t *vm, njs_value_t *options, EVP_PKEY *pkey,
     EVP_PKEY_CTX *ctx, njs_webcrypto_alg_t type)
 {
-    int                 padding;
-    int64_t             salt_length;
-    njs_int_t           ret;
-    njs_value_t         *value;
-    njs_opaque_value_t  lvalue;
+    int          padding;
+    int64_t      salt_length;
+    njs_int_t    ret;
+    njs_value_t  value;
 
-    static const njs_str_t  string_saltl = njs_str("saltLength");
+    static const njs_value_t  string_saltl = njs_string("saltLength");
 
     if (type == NJS_ALGORITHM_ECDSA) {
         return NJS_OK;
@@ -3885,14 +3566,18 @@ njs_set_rsa_padding(njs_vm_t *vm, njs_value_t *options, EVP_PKEY *pkey,
     }
 
     if (padding == RSA_PKCS1_PSS_PADDING) {
-        value = njs_vm_object_prop(vm, options, &string_saltl, &lvalue);
-        if (njs_slow_path(value == NULL)) {
-            njs_vm_type_error(vm, "RSA-PSS algorithm.saltLength is not "
-                              "provided");
+        ret = njs_value_property(vm, options, njs_value_arg(&string_saltl),
+                                 &value);
+        if (njs_slow_path(ret != NJS_OK)) {
+            if (ret == NJS_DECLINED) {
+                njs_type_error(vm, "RSA-PSS algorithm.saltLength "
+                               "is not provided");
+            }
+
             return NJS_ERROR;
         }
 
-        ret = njs_value_to_integer(vm, value, &salt_length);
+        ret = njs_value_to_integer(vm, &value, &salt_length);
         if (njs_slow_path(ret != NJS_OK)) {
             return NJS_ERROR;
         }
@@ -3939,11 +3624,10 @@ static njs_int_t
 njs_convert_der_to_p1363(njs_vm_t *vm, EVP_PKEY *pkey, const u_char *der,
     size_t der_len, u_char **pout, size_t *out_len)
 {
-    u_char        *data;
-    unsigned      n;
-    njs_int_t     ret;
-    ECDSA_SIG     *ec_sig;
-    const BIGNUM  *r, *s;
+    u_char     *data;
+    unsigned   n;
+    njs_int_t  ret;
+    ECDSA_SIG  *ec_sig;
 
     ret = NJS_OK;
     ec_sig = NULL;
@@ -3963,18 +3647,11 @@ njs_convert_der_to_p1363(njs_vm_t *vm, EVP_PKEY *pkey, const u_char *der,
         goto fail;
     }
 
-#if (OPENSSL_VERSION_NUMBER >= 0x10100000L)
-    ECDSA_SIG_get0(ec_sig, &r, &s);
-#else
-    r = ec_sig->r;
-    s = ec_sig->s;
-#endif
-
-    if (njs_bn_bn2binpad(r, data, n) <= 0) {
+    if (njs_bn_bn2binpad(ECDSA_SIG_get0_r(ec_sig), data, n) <= 0) {
         goto fail;
     }
 
-    if (njs_bn_bn2binpad(s, &data[n], n) <= 0) {
+    if (njs_bn_bn2binpad(ECDSA_SIG_get0_s(ec_sig), &data[n], n) <= 0) {
         goto fail;
     }
 
@@ -4090,7 +3767,7 @@ memory_error:
 
 static njs_int_t
 njs_ext_sign(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t verify, njs_value_t *retval)
+    njs_index_t verify)
 {
     u_char                     *dst, *p;
     size_t                     olen, outlen;
@@ -4098,10 +3775,9 @@ njs_ext_sign(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
     njs_int_t                  ret;
     njs_str_t                  data, sig;
     EVP_MD_CTX                 *mctx;
-    njs_value_t                *options;
+    njs_value_t                value, *options;
     EVP_PKEY_CTX               *pctx;
     const EVP_MD               *md;
-    njs_opaque_value_t         result;
     njs_webcrypto_key_t        *key;
     njs_webcrypto_hash_t       hash;
     njs_webcrypto_algorithm_t  *alg;
@@ -4119,22 +3795,21 @@ njs_ext_sign(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
     key = njs_vm_external(vm, njs_webcrypto_crypto_key_proto_id,
                           njs_arg(args, nargs, 2));
     if (njs_slow_path(key == NULL)) {
-        njs_vm_type_error(vm, "\"key\" is not a CryptoKey object");
+        njs_type_error(vm, "\"key\" is not a CryptoKey object");
         goto fail;
     }
 
     mask = verify ? NJS_KEY_USAGE_VERIFY : NJS_KEY_USAGE_SIGN;
     if (njs_slow_path(!(key->usage & mask))) {
-        njs_vm_type_error(vm, "provide key does not support \"sign\" "
-                          "operation");
+        njs_type_error(vm, "provide key does not support \"sign\" operation");
         goto fail;
     }
 
     if (njs_slow_path(key->alg != alg)) {
-        njs_vm_type_error(vm, "cannot %s using \"%V\" with \"%V\" key",
-                          verify ? "verify" : "sign",
-                          njs_algorithm_string(key->alg),
-                          njs_algorithm_string(alg));
+        njs_type_error(vm, "cannot %s using \"%V\" with \"%V\" key",
+                       verify ? "verify" : "sign",
+                       njs_algorithm_string(key->alg),
+                       njs_algorithm_string(alg));
         goto fail;
     }
 
@@ -4177,7 +3852,7 @@ njs_ext_sign(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
         if (!verify) {
             dst = njs_mp_alloc(njs_vm_memory_pool(vm), m_len);
             if (njs_slow_path(dst == NULL)) {
-                njs_vm_memory_error(vm);
+                njs_memory_error(vm);
                 goto fail;
             }
 
@@ -4187,8 +3862,8 @@ njs_ext_sign(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
 
         outlen = m_len;
 
-        p = HMAC(md, key->u.s.raw.start, key->u.s.raw.length, data.start,
-                 data.length, dst, &m_len);
+        p = HMAC(md, key->raw.start, key->raw.length, data.start, data.length,
+                 dst, &m_len);
 
         if (njs_slow_path(p == NULL || m_len != outlen)) {
             njs_webcrypto_error(vm, "HMAC() failed");
@@ -4229,14 +3904,14 @@ njs_ext_sign(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
             goto fail;
         }
 
-        olen = EVP_PKEY_size(key->u.a.pkey);
+        olen = EVP_PKEY_size(key->pkey);
         dst = njs_mp_zalloc(njs_vm_memory_pool(vm), olen);
         if (njs_slow_path(dst == NULL)) {
-            njs_vm_memory_error(vm);
+            njs_memory_error(vm);
             goto fail;
         }
 
-        pctx = EVP_PKEY_CTX_new(key->u.a.pkey, NULL);
+        pctx = EVP_PKEY_CTX_new(key->pkey, NULL);
         if (njs_slow_path(pctx == NULL)) {
             njs_webcrypto_error(vm, "EVP_PKEY_CTX_new() failed");
             goto fail;
@@ -4257,7 +3932,7 @@ njs_ext_sign(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
             }
         }
 
-        ret = njs_set_rsa_padding(vm, options, key->u.a.pkey, pctx, alg->type);
+        ret = njs_set_rsa_padding(vm, options, key->pkey, pctx, alg->type);
         if (njs_slow_path(ret != NJS_OK)) {
             goto fail;
         }
@@ -4277,7 +3952,7 @@ njs_ext_sign(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
             }
 
             if (alg->type == NJS_ALGORITHM_ECDSA) {
-                ret = njs_convert_der_to_p1363(vm, key->u.a.pkey, dst, outlen,
+                ret = njs_convert_der_to_p1363(vm, key->pkey, dst, outlen,
                                                &dst, &outlen);
                 if (njs_slow_path(ret != NJS_OK)) {
                     goto fail;
@@ -4286,7 +3961,7 @@ njs_ext_sign(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
 
         } else {
             if (alg->type == NJS_ALGORITHM_ECDSA) {
-                ret = njs_convert_p1363_to_der(vm, key->u.a.pkey, sig.start,
+                ret = njs_convert_p1363_to_der(vm, key->pkey, sig.start,
                                                sig.length, &sig.start,
                                                &sig.length);
                 if (njs_slow_path(ret != NJS_OK)) {
@@ -4309,17 +3984,16 @@ njs_ext_sign(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
     }
 
     if (!verify) {
-        ret = njs_vm_value_array_buffer_set(vm, njs_value_arg(&result), dst,
-                                            outlen);
+        ret = njs_vm_value_array_buffer_set(vm, &value, dst, outlen);
         if (njs_slow_path(ret != NJS_OK)) {
             goto fail;
         }
 
     } else {
-        njs_value_boolean_set(njs_value_arg(&result), ret != 0);
+        njs_set_boolean(&value, ret != 0);
     }
 
-    return njs_webcrypto_result(vm, &result, NJS_OK, retval);
+    return njs_webcrypto_result(vm, &value, NJS_OK);
 
 fail:
 
@@ -4331,264 +4005,42 @@ fail:
         EVP_PKEY_CTX_free(pctx);
     }
 
-    return njs_webcrypto_result(vm, NULL, NJS_ERROR, retval);
+    return njs_webcrypto_result(vm, njs_vm_retval(vm), NJS_ERROR);
 }
 
 
 static njs_int_t
 njs_ext_unwrap_key(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+    njs_index_t unused)
 {
-    njs_vm_internal_error(vm, "\"unwrapKey\" not implemented");
+    njs_internal_error(vm, "\"unwrapKey\" not implemented");
     return NJS_ERROR;
 }
 
 
 static njs_int_t
 njs_ext_wrap_key(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+    njs_index_t unused)
 {
-    njs_vm_internal_error(vm, "\"wrapKey\" not implemented");
+    njs_internal_error(vm, "\"wrapKey\" not implemented");
     return NJS_ERROR;
 }
 
 
 static njs_int_t
-njs_key_ext_algorithm(njs_vm_t *vm, njs_object_prop_t *prop, uint32_t unused,
-    njs_value_t *value, njs_value_t *setval, njs_value_t *retval)
-{
-    u_char               *start;
-    njs_int_t            ret;
-    njs_str_t            *name;
-    const BIGNUM         *n_bn, *e_bn;
-    const EC_GROUP       *group;
-    njs_opaque_value_t   alg, name_s, val, hash;
-    njs_webcrypto_key_t  *key;
-
-    static const njs_str_t  string_pexponent = njs_str("publicExponent");
-
-    key = njs_vm_external(vm, njs_webcrypto_crypto_key_proto_id, value);
-    if (njs_slow_path(key == NULL)) {
-        njs_value_undefined_set(retval);
-        return NJS_DECLINED;
-    }
-
-    name = &njs_webcrypto_alg[key->alg->type].name;
-    ret = njs_vm_value_string_create(vm, njs_value_arg(&alg), name->start,
-                                     name->length);
-    if (njs_slow_path(ret != NJS_OK)) {
-        return NJS_ERROR;
-    }
-
-    (void) njs_vm_value_string_create(vm, njs_value_arg(&name_s),
-                                     (u_char *) "name", njs_length("name"));
-
-    ret = njs_vm_object_alloc(vm, retval, &name_s, &alg, NULL);
-    if (njs_slow_path(ret != NJS_OK)) {
-        return NJS_ERROR;
-    }
-
-    switch (key->alg->type) {
-    case NJS_ALGORITHM_RSASSA_PKCS1_v1_5:
-    case NJS_ALGORITHM_RSA_PSS:
-    case NJS_ALGORITHM_RSA_OAEP:
-        /* RsaHashedKeyGenParams */
-
-        njs_assert(key->u.a.pkey != NULL);
-        njs_assert(EVP_PKEY_id(key->u.a.pkey) == EVP_PKEY_RSA);
-
-        njs_rsa_get0_key(njs_pkey_get_rsa_key(key->u.a.pkey), &n_bn, &e_bn,
-                         NULL);
-
-        njs_value_number_set(njs_value_arg(&val), BN_num_bits(n_bn));
-
-        ret = njs_vm_object_prop_set(vm, retval, &string_ml, &val);
-        if (njs_slow_path(ret != NJS_OK)) {
-            return NJS_ERROR;
-        }
-
-        start = njs_mp_alloc(njs_vm_memory_pool(vm), BN_num_bytes(e_bn));
-        if (njs_slow_path(start == NULL)) {
-            njs_vm_memory_error(vm);
-            return NJS_ERROR;
-        }
-
-        BN_bn2bin(e_bn, start);
-
-        ret = njs_vm_value_buffer_set(vm, njs_value_arg(&val), start,
-                                      BN_num_bytes(e_bn));
-        if (njs_slow_path(ret != NJS_OK)) {
-            return NJS_ERROR;
-        }
-
-        ret = njs_vm_object_prop_set(vm, retval, &string_pexponent, &val);
-        if (njs_slow_path(ret != NJS_OK)) {
-            return NJS_ERROR;
-        }
-
-        name = njs_algorithm_hash_name(key->hash);
-        ret = njs_vm_value_string_create(vm, njs_value_arg(&hash), name->start,
-                                         name->length);
-        if (njs_slow_path(ret != NJS_OK)) {
-            return NJS_ERROR;
-        }
-
-        ret = njs_vm_object_alloc(vm, njs_value_arg(&val), NULL);
-        if (njs_slow_path(ret != NJS_OK)) {
-            return NJS_ERROR;
-        }
-
-        ret = njs_vm_object_prop_set(vm, njs_value_arg(&val), &string_name,
-                                     &hash);
-        if (njs_slow_path(ret != NJS_OK)) {
-            return NJS_ERROR;
-        }
-
-        ret = njs_vm_object_prop_set(vm, retval, &string_hash, &val);
-        if (njs_slow_path(ret != NJS_OK)) {
-            return NJS_ERROR;
-        }
-
-        break;
-
-    case NJS_ALGORITHM_AES_GCM:
-    case NJS_ALGORITHM_AES_CTR:
-    case NJS_ALGORITHM_AES_CBC:
-        /* AesKeyGenParams */
-
-        njs_value_number_set(njs_value_arg(&val), key->u.s.raw.length * 8);
-
-        ret = njs_vm_object_prop_set(vm, retval, &string_length, &val);
-        if (njs_slow_path(ret != NJS_OK)) {
-            return NJS_ERROR;
-        }
-
-        break;
-
-    case NJS_ALGORITHM_ECDSA:
-    case NJS_ALGORITHM_ECDH:
-        /* EcKeyGenParams */
-
-        njs_assert(key->u.a.pkey != NULL);
-        njs_assert(EVP_PKEY_id(key->u.a.pkey) == EVP_PKEY_EC);
-
-        group = EC_KEY_get0_group(njs_pkey_get_ec_key(key->u.a.pkey));
-
-        name = njs_algorithm_curve_name(EC_GROUP_get_curve_name(group));
-
-        ret = njs_vm_value_string_create(vm, njs_value_arg(&val), name->start,
-                                         name->length);
-        if (njs_slow_path(ret != NJS_OK)) {
-            return NJS_ERROR;
-        }
-
-        ret = njs_vm_object_prop_set(vm, retval, &string_curve, &val);
-        if (njs_slow_path(ret != NJS_OK)) {
-            return NJS_ERROR;
-        }
-
-        break;
-
-    case NJS_ALGORITHM_HMAC:
-    default:
-        /* HmacKeyGenParams */
-
-        name = njs_algorithm_hash_name(key->hash);
-        ret = njs_vm_value_string_create(vm, njs_value_arg(&val), name->start,
-                                         name->length);
-        if (njs_slow_path(ret != NJS_OK)) {
-            return NJS_ERROR;
-        }
-
-        ret = njs_vm_object_prop_set(vm, retval, &string_hash, &val);
-        if (njs_slow_path(ret != NJS_OK)) {
-            return NJS_ERROR;
-        }
-
-        break;
-    }
-
-    return NJS_OK;
-}
-
-
-static njs_int_t
-njs_key_ext_extractable(njs_vm_t *vm, njs_object_prop_t *prop, uint32_t unused,
-    njs_value_t *value, njs_value_t *setval, njs_value_t *retval)
-{
-    njs_webcrypto_key_t  *key;
-
-    key = njs_vm_external(vm, njs_webcrypto_crypto_key_proto_id, value);
-    if (njs_slow_path(key == NULL)) {
-        njs_value_undefined_set(retval);
-        return NJS_DECLINED;
-    }
-
-    njs_value_boolean_set(retval, key->extractable);
-
-    return NJS_OK;
-}
-
-
-static njs_int_t
-njs_key_ext_type(njs_vm_t *vm, njs_object_prop_t *prop, uint32_t unused,
-    njs_value_t *value, njs_value_t *setval, njs_value_t *retval)
-{
-    const char           *type;
-    njs_webcrypto_key_t  *key;
-
-    key = njs_vm_external(vm, njs_webcrypto_crypto_key_proto_id, value);
-    if (njs_slow_path(key == NULL)) {
-        njs_value_undefined_set(retval);
-        return NJS_DECLINED;
-    }
-
-    if (key->alg->raw) {
-        (void) njs_vm_value_string_create(vm, retval, (u_char *) "secret",
-                                          njs_length("secret"));
-    } else {
-        type = key->u.a.privat ? "private": "public";
-        (void) njs_vm_value_string_create(vm, retval, (u_char *) type,
-                                          key->u.a.privat ? 7 : 6);
-    }
-
-    return NJS_OK;
-}
-
-
-static njs_int_t
-njs_key_ext_usages(njs_vm_t *vm, njs_object_prop_t *prop, uint32_t unused,
-    njs_value_t *value, njs_value_t *setval, njs_value_t *retval)
-{
-    njs_webcrypto_key_t  *key;
-
-    key = njs_vm_external(vm, njs_webcrypto_crypto_key_proto_id, value);
-    if (njs_slow_path(key == NULL)) {
-        njs_value_undefined_set(retval);
-        return NJS_DECLINED;
-    }
-
-    return njs_key_ops(vm, retval, key->usage);
-}
-
-
-static njs_int_t
 njs_ext_get_random_values(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+    njs_index_t unused)
 {
-    njs_int_t    ret;
-    njs_str_t    fill;
-    njs_value_t  *buffer;
+    njs_int_t  ret;
+    njs_str_t  fill;
 
-    buffer = njs_arg(args, nargs, 1);
-
-    ret = njs_vm_value_to_bytes(vm, &fill, buffer);
+    ret = njs_vm_value_to_bytes(vm, &fill, njs_arg(args, nargs, 1));
     if (njs_slow_path(ret != NJS_OK)) {
         return NJS_ERROR;
     }
 
     if (njs_slow_path(fill.length > 65536)) {
-        njs_vm_type_error(vm, "requested length exceeds 65536 bytes");
+        njs_type_error(vm, "requested length exceeds 65536 bytes");
         return NJS_ERROR;
     }
 
@@ -4596,8 +4048,6 @@ njs_ext_get_random_values(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
         njs_webcrypto_error(vm, "RAND_bytes() failed");
         return NJS_ERROR;
     }
-
-    njs_value_assign(retval, buffer);
 
     return NJS_OK;
 }
@@ -4608,8 +4058,8 @@ njs_webcrypto_cleanup_pkey(void *data)
 {
     njs_webcrypto_key_t  *key = data;
 
-    if (!key->alg->raw) {
-        EVP_PKEY_free(key->u.a.pkey);
+    if (key->pkey != NULL) {
+        EVP_PKEY_free(key->pkey);
     }
 }
 
@@ -4623,13 +4073,13 @@ njs_webcrypto_key_alloc(njs_vm_t *vm, njs_webcrypto_algorithm_t *alg,
 
     key = njs_mp_zalloc(njs_vm_memory_pool(vm), sizeof(njs_webcrypto_key_t));
     if (njs_slow_path(key == NULL)) {
-        njs_vm_memory_error(vm);
+        njs_memory_error(vm);
         return NULL;
     }
 
     cln = njs_mp_cleanup_add(njs_vm_memory_pool(vm), 0);
     if (cln == NULL) {
-        njs_vm_memory_error(vm);
+        njs_memory_error(vm);
         return NULL;
     }
 
@@ -4649,15 +4099,15 @@ njs_key_format(njs_vm_t *vm, njs_value_t *value)
 {
     njs_int_t              ret;
     njs_str_t              format;
-    njs_opaque_value_t     string;
+    njs_value_t            string;
     njs_webcrypto_entry_t  *e;
 
-    ret = njs_value_to_string(vm, njs_value_arg(&string), value);
+    ret = njs_value_to_string(vm, &string, value);
     if (njs_slow_path(ret != NJS_OK)) {
         return NJS_KEY_FORMAT_UNKNOWN;
     }
 
-    njs_value_string_get(vm, njs_value_arg(&string), &format);
+    njs_string_get(&string, &format);
 
     for (e = &njs_webcrypto_format[0]; e->name.length != 0; e++) {
         if (njs_strstr_eq(&format, &e->name)) {
@@ -4665,7 +4115,7 @@ njs_key_format(njs_vm_t *vm, njs_value_t *value)
         }
     }
 
-    njs_vm_type_error(vm, "unknown key format: \"%V\"", &format);
+    njs_type_error(vm, "unknown key format: \"%V\"", &format);
 
     return NJS_KEY_FORMAT_UNKNOWN;
 }
@@ -4688,22 +4138,22 @@ njs_format_string(njs_webcrypto_key_format_t fmt)
 
 static njs_int_t
 njs_key_usage_array_handler(njs_vm_t *vm, njs_iterator_args_t *args,
-    njs_value_t *value, int64_t index, njs_value_t *retval)
+    njs_value_t *value, int64_t index)
 {
     unsigned               *mask;
     njs_str_t              u;
     njs_int_t              ret;
-    njs_opaque_value_t     usage;
+    njs_value_t            usage;
     njs_webcrypto_entry_t  *e;
 
     njs_value_assign(&usage, value);
 
-    ret = njs_value_to_string(vm, njs_value_arg(&usage), njs_value_arg(&usage));
+    ret = njs_value_to_string(vm, &usage, &usage);
     if (njs_slow_path(ret != NJS_OK)) {
         return NJS_ERROR;
     }
 
-    njs_value_string_get(vm, njs_value_arg(&usage), &u);
+    njs_string_get(&usage, &u);
 
     for (e = &njs_webcrypto_usage[0]; e->name.length != 0; e++) {
         if (njs_strstr_eq(&u, &e->name)) {
@@ -4713,7 +4163,7 @@ njs_key_usage_array_handler(njs_vm_t *vm, njs_iterator_args_t *args,
         }
     }
 
-    njs_vm_type_error(vm, "unknown key usage: \"%V\"", &u);
+    njs_type_error(vm, "unknown key usage: \"%V\"", &u);
 
     return NJS_ERROR;
 }
@@ -4724,28 +4174,26 @@ njs_key_usage(njs_vm_t *vm, njs_value_t *value, unsigned *mask)
 {
     int64_t              length;
     njs_int_t            ret;
-    njs_opaque_value_t   retval;
     njs_iterator_args_t  args;
 
-    if (!njs_value_is_array(value)) {
-        njs_vm_type_error(vm, "\"keyUsages\" argument must be an Array");
+    if (!njs_value_is_object(value)) {
+        njs_type_error(vm, "\"keyUsages\" argument must be an Array");
         return NJS_ERROR;
     }
 
-    ret = njs_vm_array_length(vm, value, &length);
+    ret = njs_object_length(vm, value, &length);
     if (njs_slow_path(ret != NJS_OK)) {
         return NJS_ERROR;
     }
 
     *mask = 0;
 
-    njs_value_assign(&args.value, value);
+    args.value = value;
     args.from = 0;
     args.to = length;
     args.data = mask;
 
-    return njs_vm_object_iterate(vm, &args, njs_key_usage_array_handler,
-                                 njs_value_arg(&retval));
+    return njs_object_iterate(vm, &args, njs_key_usage_array_handler);
 }
 
 
@@ -4768,8 +4216,8 @@ njs_key_ops(njs_vm_t *vm, njs_value_t *retval, unsigned mask)
                 return NJS_ERROR;
             }
 
-            ret = njs_vm_value_string_create(vm, value, e->name.start,
-                                             e->name.length);
+            ret = njs_vm_value_string_set(vm, value, e->name.start,
+                                          e->name.length);
             if (ret != NJS_OK) {
                 return NJS_ERROR;
             }
@@ -4785,15 +4233,20 @@ njs_key_algorithm(njs_vm_t *vm, njs_value_t *options)
 {
     njs_int_t                  ret;
     njs_str_t                  a;
-    njs_value_t                *val;
-    njs_opaque_value_t         name;
+    njs_value_t                name;
     njs_webcrypto_entry_t      *e;
     njs_webcrypto_algorithm_t  *alg;
 
-    if (njs_value_is_object(options)) {
-        val = njs_vm_object_prop(vm, options, &string_name, &name);
-        if (njs_slow_path(val == NULL)) {
-            njs_vm_type_error(vm, "algorithm name is not provided");
+    static const njs_value_t  string_name = njs_string("name");
+
+    if (njs_is_object(options)) {
+        ret = njs_value_property(vm, options, njs_value_arg(&string_name),
+                                 &name);
+        if (njs_slow_path(ret != NJS_OK)) {
+            if (ret == NJS_DECLINED) {
+                njs_type_error(vm, "algorithm name is not provided");
+            }
+
             return NULL;
         }
 
@@ -4801,22 +4254,26 @@ njs_key_algorithm(njs_vm_t *vm, njs_value_t *options)
         njs_value_assign(&name, options);
     }
 
-    ret = njs_value_to_string(vm, njs_value_arg(&name), njs_value_arg(&name));
+    ret = njs_value_to_string(vm, &name, &name);
     if (njs_slow_path(ret != NJS_OK)) {
         return NULL;
     }
 
-    njs_value_string_get(vm, njs_value_arg(&name), &a);
+    njs_string_get(&name, &a);
 
     for (e = &njs_webcrypto_alg[0]; e->name.length != 0; e++) {
         if (njs_strstr_case_eq(&a, &e->name)) {
             alg = (njs_webcrypto_algorithm_t *) e->value;
+            if (alg->usage & NJS_KEY_USAGE_UNSUPPORTED) {
+                njs_type_error(vm, "unsupported algorithm: \"%V\"", &a);
+                return NULL;
+            }
 
             return alg;
         }
     }
 
-    njs_vm_type_error(vm, "unknown algorithm name: \"%V\"", &a);
+    njs_type_error(vm, "unknown algorithm name: \"%V\"", &a);
 
     return NULL;
 }
@@ -4845,27 +4302,28 @@ njs_algorithm_hash(njs_vm_t *vm, njs_value_t *options,
 {
     njs_int_t              ret;
     njs_str_t              name;
-    njs_value_t            *val;
-    njs_opaque_value_t     value;
+    njs_value_t            value;
     njs_webcrypto_entry_t  *e;
 
-    if (njs_value_is_object(options)) {
-        val = njs_vm_object_prop(vm, options, &string_hash, &value);
-        if (val == NULL) {
-            *hash = NJS_HASH_SHA256;
-            return NJS_OK;
+    static const njs_value_t  string_hash = njs_string("hash");
+
+    if (njs_is_object(options)) {
+        ret = njs_value_property(vm, options, njs_value_arg(&string_hash),
+                                 &value);
+        if (njs_slow_path(ret == NJS_ERROR)) {
+            return NJS_ERROR;
         }
 
     } else {
         njs_value_assign(&value, options);
     }
 
-    ret = njs_value_to_string(vm, njs_value_arg(&value), njs_value_arg(&value));
+    ret = njs_value_to_string(vm, &value, &value);
     if (njs_slow_path(ret != NJS_OK)) {
         return NJS_ERROR;
     }
 
-    njs_value_string_get(vm, njs_value_arg(&value), &name);
+    njs_string_get(&value, &name);
 
     for (e = &njs_webcrypto_hash[0]; e->name.length != 0; e++) {
         if (njs_strstr_eq(&name, &e->name)) {
@@ -4874,24 +4332,9 @@ njs_algorithm_hash(njs_vm_t *vm, njs_value_t *options,
         }
     }
 
-    njs_vm_type_error(vm, "unknown hash name: \"%V\"", &name);
+    njs_type_error(vm, "unknown hash name: \"%V\"", &name);
 
     return NJS_ERROR;
-}
-
-
-static njs_str_t *
-njs_algorithm_hash_name(njs_webcrypto_hash_t hash)
-{
-    njs_webcrypto_entry_t  *e;
-
-    for (e = &njs_webcrypto_hash[0]; e->name.length != 0; e++) {
-        if (e->value == hash) {
-            return &e->name;
-        }
-    }
-
-    return &e->name;
 }
 
 
@@ -4922,25 +4365,27 @@ njs_algorithm_curve(njs_vm_t *vm, njs_value_t *options, int *curve)
 {
     njs_int_t              ret;
     njs_str_t              name;
-    njs_value_t            *val;
-    njs_opaque_value_t     value;
+    njs_value_t            value;
     njs_webcrypto_entry_t  *e;
+
+    static const njs_value_t  string_curve = njs_string("namedCurve");
 
     if (*curve != 0) {
         return NJS_OK;
     }
 
-    val = njs_vm_object_prop(vm, options, &string_curve, &value);
-    if (njs_slow_path(val == NULL)) {
-        njs_value_undefined_set(njs_value_arg(&value));
+    ret = njs_value_property(vm, options, njs_value_arg(&string_curve),
+                             &value);
+    if (njs_slow_path(ret != NJS_OK)) {
+        return ret;
     }
 
-    ret = njs_value_to_string(vm, njs_value_arg(&value), njs_value_arg(&value));
+    ret = njs_value_to_string(vm, &value, &value);
     if (njs_slow_path(ret != NJS_OK)) {
         return NJS_ERROR;
     }
 
-    njs_value_string_get(vm, njs_value_arg(&value), &name);
+    njs_string_get(&value, &name);
 
     for (e = &njs_webcrypto_curve[0]; e->name.length != 0; e++) {
         if (njs_strstr_eq(&name, &e->name)) {
@@ -4949,37 +4394,22 @@ njs_algorithm_curve(njs_vm_t *vm, njs_value_t *options, int *curve)
         }
     }
 
-    njs_vm_type_error(vm, "unknown namedCurve: \"%V\"", &name);
+    njs_type_error(vm, "unknown namedCurve: \"%V\"", &name);
 
     return NJS_ERROR;
 }
 
 
-static njs_str_t *
-njs_algorithm_curve_name(int curve)
-{
-    njs_webcrypto_entry_t  *e;
-
-    for (e = &njs_webcrypto_curve[0]; e->name.length != 0; e++) {
-        if (e->value == (uintptr_t) curve) {
-            return &e->name;
-        }
-    }
-
-    return &e->name;
-}
-
-
 static njs_int_t
 njs_promise_trampoline(njs_vm_t *vm, njs_value_t *args,
-    njs_uint_t nargs, njs_index_t unused, njs_value_t *retval)
+    njs_uint_t nargs, njs_index_t unused)
 {
     njs_function_t  *callback;
 
     callback = njs_value_function(njs_argument(args, 1));
 
     if (callback != NULL) {
-        return njs_vm_invoke(vm, callback, njs_argument(args, 2), 1, retval);
+        return njs_vm_call(vm, callback, njs_argument(args, 2), 1);
     }
 
     return NJS_OK;
@@ -4987,15 +4417,14 @@ njs_promise_trampoline(njs_vm_t *vm, njs_value_t *args,
 
 
 static njs_int_t
-njs_webcrypto_result(njs_vm_t *vm, njs_opaque_value_t *result, njs_int_t rc,
-    njs_value_t *retval)
+njs_webcrypto_result(njs_vm_t *vm, njs_value_t *result, njs_int_t rc)
 {
-    njs_int_t           ret;
-    njs_function_t      *callback;
-    njs_opaque_value_t  promise, arguments[2];
+    njs_int_t       ret;
+    njs_value_t     retval, arguments[2];
+    njs_function_t  *callback;
+    njs_vm_event_t  vm_event;
 
-    ret = njs_vm_promise_create(vm, njs_value_arg(&promise),
-                                njs_value_arg(&arguments));
+    ret = njs_vm_promise_create(vm, &retval, njs_value_arg(&arguments));
     if (ret != NJS_OK) {
         goto error;
     }
@@ -5005,27 +4434,26 @@ njs_webcrypto_result(njs_vm_t *vm, njs_opaque_value_t *result, njs_int_t rc,
         goto error;
     }
 
-    njs_value_assign(&arguments[0], &arguments[(rc != NJS_OK)]);
-
-    if (rc != NJS_OK) {
-        njs_vm_exception_get(vm, njs_value_arg(&arguments[1]));
-
-    } else {
-        njs_value_assign(&arguments[1], result);
+    vm_event = njs_vm_add_event(vm, callback, 1, NULL, NULL);
+    if (vm_event == NULL) {
+        goto error;
     }
 
-    ret = njs_vm_enqueue_job(vm, callback, njs_value_arg(&arguments), 2);
+    njs_value_assign(&arguments[0], &arguments[(rc != NJS_OK)]);
+    njs_value_assign(&arguments[1], result);
+
+    ret = njs_vm_post_event(vm, vm_event, njs_value_arg(&arguments), 2);
     if (ret == NJS_ERROR) {
         goto error;
     }
 
-    njs_value_assign(retval, &promise);
+    njs_vm_retval_set(vm, njs_value_arg(&retval));
 
     return NJS_OK;
 
 error:
 
-    njs_vm_internal_error(vm, "cannot make webcrypto result");
+    njs_vm_error(vm, "internal error");
 
     return NJS_ERROR;
 }
@@ -5039,7 +4467,7 @@ njs_webcrypto_array_buffer(njs_vm_t *vm, njs_value_t *retval,
 
     dst = njs_mp_alloc(njs_vm_memory_pool(vm), length);
     if (njs_slow_path(dst == NULL)) {
-        njs_vm_memory_error(vm);
+        njs_memory_error(vm);
         return NJS_ERROR;
     }
 
@@ -5129,7 +4557,7 @@ njs_webcrypto_error(njs_vm_t *vm, const char *fmt, ...)
         }
     }
 
-    njs_vm_error(vm, "%*s", p - errstr, errstr);
+    njs_vm_value_error_set(vm, njs_vm_retval(vm), "%*s", p - errstr, errstr);
 }
 
 

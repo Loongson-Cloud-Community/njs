@@ -35,9 +35,7 @@ njs_int_t njs_array_string_add(njs_vm_t *vm, njs_array_t *array,
 njs_int_t njs_array_expand(njs_vm_t *vm, njs_array_t *array, uint32_t prepend,
     uint32_t append);
 njs_int_t njs_array_prototype_to_string(njs_vm_t *vm, njs_value_t *args,
-    njs_uint_t nargs, njs_index_t unused, njs_value_t *retval);
-int njs_array_indices_handler_nums(const void *first, const void *second,
-    void *ctx);
+    njs_uint_t nargs, njs_index_t unused);
 
 
 njs_inline njs_value_t *

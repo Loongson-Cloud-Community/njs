@@ -5,15 +5,12 @@
  */
 
 
-#include <njs.h>
-#include <njs_string.h>
-#include <njs_buffer.h>
-#include "njs_hash.h"
+#include <njs_main.h>
 
 
-typedef void (*njs_hash_init)(njs_hash_t *ctx);
-typedef void (*njs_hash_update)(njs_hash_t *ctx, const void *data, size_t size);
-typedef void (*njs_hash_final)(u_char result[32], njs_hash_t *ctx);
+typedef void (*njs_hash_init)(void *ctx);
+typedef void (*njs_hash_update)(void *ctx, const void *data, size_t size);
+typedef void (*njs_hash_final)(u_char *result, void *ctx);
 
 typedef njs_int_t (*njs_digest_encode)(njs_vm_t *vm, njs_value_t *value,
     const njs_str_t *src);
@@ -29,13 +26,24 @@ typedef struct {
 } njs_hash_alg_t;
 
 typedef struct {
-    njs_hash_t          ctx;
+    union {
+        njs_md5_t       md5;
+        njs_sha1_t      sha1;
+        njs_sha2_t      sha2;
+    } u;
+
     njs_hash_alg_t      *alg;
 } njs_digest_t;
 
 typedef struct {
     u_char              opad[64];
-    njs_hash_t          ctx;
+
+    union {
+        njs_md5_t       md5;
+        njs_sha1_t      sha1;
+        njs_sha2_t      sha2;
+    } u;
+
     njs_hash_alg_t      *alg;
 } njs_hmac_t;
 
@@ -48,21 +56,21 @@ typedef struct {
 
 
 static njs_hash_alg_t *njs_crypto_algorithm(njs_vm_t *vm,
-    njs_value_t *value);
+    const njs_value_t *value);
 static njs_crypto_enc_t *njs_crypto_encoding(njs_vm_t *vm,
-    njs_value_t *value);
+    const njs_value_t *value);
 static njs_int_t njs_buffer_digest(njs_vm_t *vm, njs_value_t *value,
     const njs_str_t *src);
 static njs_int_t njs_crypto_create_hash(njs_vm_t *vm, njs_value_t *args,
-    njs_uint_t nargs, njs_index_t unused, njs_value_t *retval);
+    njs_uint_t nargs, njs_index_t unused);
 static njs_int_t njs_hash_prototype_update(njs_vm_t *vm, njs_value_t *args,
-    njs_uint_t nargs, njs_index_t hmac, njs_value_t *retval);
+    njs_uint_t nargs, njs_index_t hmac);
 static njs_int_t njs_hash_prototype_digest(njs_vm_t *vm, njs_value_t *args,
-    njs_uint_t nargs, njs_index_t hmac, njs_value_t *retval);
+    njs_uint_t nargs, njs_index_t hmac);
 static njs_int_t njs_hash_prototype_copy(njs_vm_t *vm, njs_value_t *args,
-    njs_uint_t nargs, njs_index_t hmac, njs_value_t *retval);
+    njs_uint_t nargs, njs_index_t hmac);
 static njs_int_t njs_crypto_create_hmac(njs_vm_t *vm, njs_value_t *args,
-    njs_uint_t nargs, njs_index_t unused, njs_value_t *retval);
+    njs_uint_t nargs, njs_index_t unused);
 
 static njs_int_t njs_crypto_init(njs_vm_t *vm);
 
@@ -72,25 +80,25 @@ static njs_hash_alg_t njs_hash_algorithms[] = {
    {
      njs_str("md5"),
      16,
-     njs_md5_init,
-     njs_md5_update,
-     njs_md5_final
+     (njs_hash_init) njs_md5_init,
+     (njs_hash_update) njs_md5_update,
+     (njs_hash_final) njs_md5_final
    },
 
    {
      njs_str("sha1"),
      20,
-     njs_sha1_init,
-     njs_sha1_update,
-     njs_sha1_final
+     (njs_hash_init) njs_sha1_init,
+     (njs_hash_update) njs_sha1_update,
+     (njs_hash_final) njs_sha1_final
    },
 
    {
      njs_str("sha256"),
      32,
-     njs_sha2_init,
-     njs_sha2_update,
-     njs_sha2_final
+     (njs_hash_init) njs_sha2_init,
+     (njs_hash_update) njs_sha2_update,
+     (njs_hash_final) njs_sha2_final
    },
 
    {
@@ -274,14 +282,13 @@ static njs_int_t    njs_crypto_hmac_proto_id;
 
 njs_module_t  njs_crypto_module = {
     .name = njs_str("crypto"),
-    .preinit = NULL,
     .init = njs_crypto_init,
 };
 
 
 static njs_int_t
 njs_crypto_create_hash(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+    njs_index_t unused)
 {
     njs_digest_t    *dgst;
     njs_hash_alg_t  *alg;
@@ -291,44 +298,46 @@ njs_crypto_create_hash(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
         return NJS_ERROR;
     }
 
-    dgst = njs_mp_alloc(njs_vm_memory_pool(vm), sizeof(njs_digest_t));
+    dgst = njs_mp_alloc(vm->mem_pool, sizeof(njs_digest_t));
     if (njs_slow_path(dgst == NULL)) {
-        njs_vm_memory_error(vm);
+        njs_memory_error(vm);
         return NJS_ERROR;
     }
 
     dgst->alg = alg;
 
-    alg->init(&dgst->ctx);
+    alg->init(&dgst->u);
 
-    return njs_vm_external_create(vm, retval, njs_crypto_hash_proto_id,
+    return njs_vm_external_create(vm, &vm->retval, njs_crypto_hash_proto_id,
                                   dgst, 0);
 }
 
 
 static njs_int_t
 njs_hash_prototype_update(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t hmac, njs_value_t *retval)
+    njs_index_t hmac)
 {
     njs_str_t                    data;
     njs_int_t                    ret;
     njs_hmac_t                   *ctx;
-    njs_value_t                  *this, *value;
+    njs_value_t                  *this, dst;
     njs_digest_t                 *dgst;
-    njs_opaque_value_t           result;
-    const njs_buffer_encoding_t  *enc;
+    njs_typed_array_t            *array;
+    const njs_value_t            *value;
+    njs_array_buffer_t           *buffer;
+    const njs_buffer_encoding_t  *encoding;
 
     this = njs_argument(args, 0);
 
     if (!hmac) {
         dgst = njs_vm_external(vm, njs_crypto_hash_proto_id, this);
         if (njs_slow_path(dgst == NULL)) {
-            njs_vm_type_error(vm, "\"this\" is not a hash object");
+            njs_type_error(vm, "\"this\" is not a hash object");
             return NJS_ERROR;
         }
 
         if (njs_slow_path(dgst->alg == NULL)) {
-            njs_vm_error(vm, "Digest already called");
+            njs_error(vm, "Digest already called");
             return NJS_ERROR;
         }
 
@@ -337,12 +346,12 @@ njs_hash_prototype_update(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
     } else {
         ctx = njs_vm_external(vm, njs_crypto_hmac_proto_id, this);
         if (njs_slow_path(ctx == NULL)) {
-            njs_vm_type_error(vm, "\"this\" is not a hmac object");
+            njs_type_error(vm, "\"this\" is not a hmac object");
             return NJS_ERROR;
         }
 
         if (njs_slow_path(ctx->alg == NULL)) {
-            njs_vm_error(vm, "Digest already called");
+            njs_error(vm, "Digest already called");
             return NJS_ERROR;
         }
 
@@ -351,39 +360,49 @@ njs_hash_prototype_update(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
 
     value = njs_arg(args, nargs, 1);
 
-    if (njs_value_is_string(value)) {
-        enc = njs_buffer_encoding(vm, njs_arg(args, nargs, 2), 1);
-        if (njs_slow_path(enc == NULL)) {
+    switch (value->type) {
+    case NJS_STRING:
+        encoding = njs_buffer_encoding(vm, njs_arg(args, nargs, 2));
+        if (njs_slow_path(encoding == NULL)) {
             return NJS_ERROR;
         }
 
-        ret = njs_buffer_decode_string(vm, value, njs_value_arg(&result), enc);
+        ret = njs_buffer_decode_string(vm, value, &dst, encoding);
         if (njs_slow_path(ret != NJS_OK)) {
             return NJS_ERROR;
         }
 
-        njs_value_string_get(vm, njs_value_arg(&result), &data);
+        njs_string_get(&dst, &data);
+        break;
 
-    } else if (njs_value_is_buffer(value)) {
-        ret = njs_value_buffer_get(vm, value, &data);
-        if (njs_slow_path(ret != NJS_OK)) {
+    case NJS_TYPED_ARRAY:
+    case NJS_DATA_VIEW:
+        array = njs_typed_array(value);
+        buffer = array->buffer;
+        if (njs_slow_path(njs_is_detached_buffer(buffer))) {
+            njs_type_error(vm, "detached buffer");
             return NJS_ERROR;
         }
 
-    } else {
-        njs_vm_type_error(vm, "data is not a string or Buffer-like object");
+        data.start = &buffer->u.u8[array->offset];
+        data.length = array->byte_length;
+        break;
+
+    default:
+        njs_type_error(vm, "data argument \"%s\" is not a string "
+                       "or Buffer-like object", njs_type_string(value->type));
 
         return NJS_ERROR;
     }
 
     if (!hmac) {
-        dgst->alg->update(&dgst->ctx, data.start, data.length);
+        dgst->alg->update(&dgst->u, data.start, data.length);
 
     } else {
-        ctx->alg->update(&ctx->ctx, data.start, data.length);
+        ctx->alg->update(&ctx->u, data.start, data.length);
     }
 
-    njs_value_assign(retval, this);
+    vm->retval = *this;
 
     return NJS_OK;
 }
@@ -391,7 +410,7 @@ njs_hash_prototype_update(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
 
 static njs_int_t
 njs_hash_prototype_digest(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t hmac, njs_value_t *retval)
+    njs_index_t hmac)
 {
     njs_str_t         str;
     njs_hmac_t        *ctx;
@@ -406,7 +425,7 @@ njs_hash_prototype_digest(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
     if (!hmac) {
         dgst = njs_vm_external(vm, njs_crypto_hash_proto_id, this);
         if (njs_slow_path(dgst == NULL)) {
-            njs_vm_type_error(vm, "\"this\" is not a hash object");
+            njs_type_error(vm, "\"this\" is not a hash object");
             return NJS_ERROR;
         }
 
@@ -419,7 +438,7 @@ njs_hash_prototype_digest(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
     } else {
         ctx = njs_vm_external(vm, njs_crypto_hmac_proto_id, this);
         if (njs_slow_path(ctx == NULL)) {
-            njs_vm_type_error(vm, "\"this\" is not a hmac object");
+            njs_type_error(vm, "\"this\" is not a hmac object");
             return NJS_ERROR;
         }
 
@@ -437,76 +456,74 @@ njs_hash_prototype_digest(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
 
     if (!hmac) {
         alg = dgst->alg;
-        alg->final(digest, &dgst->ctx);
+        alg->final(digest, &dgst->u);
         dgst->alg = NULL;
 
     } else {
         alg = ctx->alg;
-        alg->final(hash1, &ctx->ctx);
+        alg->final(hash1, &ctx->u);
 
-        alg->init(&ctx->ctx);
-        alg->update(&ctx->ctx, ctx->opad, 64);
-        alg->update(&ctx->ctx, hash1, alg->size);
-        alg->final(digest, &ctx->ctx);
+        alg->init(&ctx->u);
+        alg->update(&ctx->u, ctx->opad, 64);
+        alg->update(&ctx->u, hash1, alg->size);
+        alg->final(digest, &ctx->u);
         ctx->alg = NULL;
     }
 
     str.start = digest;
     str.length = alg->size;
 
-    return enc->encode(vm, retval, &str);
+    return enc->encode(vm, &vm->retval, &str);
 
 exception:
 
-    njs_vm_error(vm, "Digest already called");
-
+    njs_error(vm, "Digest already called");
     return NJS_ERROR;
 }
 
 
 static njs_int_t
 njs_hash_prototype_copy(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+    njs_index_t unused)
 {
     njs_digest_t  *dgst, *copy;
 
     dgst = njs_vm_external(vm, njs_crypto_hash_proto_id, njs_argument(args, 0));
     if (njs_slow_path(dgst == NULL)) {
-        njs_vm_type_error(vm, "\"this\" is not a hash object");
+        njs_type_error(vm, "\"this\" is not a hash object");
         return NJS_ERROR;
     }
 
     if (njs_slow_path(dgst->alg == NULL)) {
-        njs_vm_error(vm, "Digest already called");
+        njs_error(vm, "Digest already called");
         return NJS_ERROR;
     }
 
     copy = njs_mp_alloc(njs_vm_memory_pool(vm), sizeof(njs_digest_t));
     if (njs_slow_path(copy == NULL)) {
-        njs_vm_memory_error(vm);
+        njs_memory_error(vm);
         return NJS_ERROR;
     }
 
     memcpy(copy, dgst, sizeof(njs_digest_t));
 
-    return njs_vm_external_create(vm, retval,
+    return njs_vm_external_create(vm, njs_vm_retval(vm),
                                   njs_crypto_hash_proto_id, copy, 0);
 }
 
 
 static njs_int_t
 njs_crypto_create_hmac(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+    njs_index_t unused)
 {
-    njs_int_t                    ret;
-    njs_str_t                    key;
-    njs_uint_t                   i;
-    njs_hmac_t                   *ctx;
-    njs_value_t                  *value;
-    njs_hash_alg_t               *alg;
-    njs_opaque_value_t           result;
-    const njs_buffer_encoding_t  *enc;
-    u_char                       digest[32], key_buf[64];
+    njs_str_t           key;
+    njs_uint_t          i;
+    njs_hmac_t          *ctx;
+    njs_hash_alg_t      *alg;
+    njs_typed_array_t   *array;
+    const njs_value_t   *value;
+    njs_array_buffer_t  *buffer;
+    u_char              digest[32], key_buf[64];
 
     alg = njs_crypto_algorithm(vm, njs_arg(args, nargs, 1));
     if (njs_slow_path(alg == NULL)) {
@@ -515,43 +532,43 @@ njs_crypto_create_hmac(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
 
     value = njs_arg(args, nargs, 2);
 
-    if (njs_value_is_string(value)) {
-        enc = njs_buffer_encoding(vm, njs_value_arg(&njs_value_undefined), 1);
-        if (njs_slow_path(enc == NULL)) {
+    switch (value->type) {
+    case NJS_STRING:
+        njs_string_get(value, &key);
+        break;
+
+    case NJS_TYPED_ARRAY:
+    case NJS_DATA_VIEW:
+        array = njs_typed_array(value);
+        buffer = array->buffer;
+        if (njs_slow_path(njs_is_detached_buffer(buffer))) {
+            njs_type_error(vm, "detached buffer");
             return NJS_ERROR;
         }
 
-        ret = njs_buffer_decode_string(vm, value, njs_value_arg(&result), enc);
-        if (njs_slow_path(ret != NJS_OK)) {
-            return NJS_ERROR;
-        }
+        key.start = &buffer->u.u8[array->offset];
+        key.length = array->byte_length;
+        break;
 
-        njs_value_string_get(vm, njs_value_arg(&result), &key);
-
-    } else if (njs_value_is_buffer(value)) {
-        ret = njs_value_buffer_get(vm, value, &key);
-        if (njs_slow_path(ret != NJS_OK)) {
-            return NJS_ERROR;
-        }
-
-    } else {
-        njs_vm_type_error(vm, "key is not a string or Buffer-like object");
+    default:
+        njs_type_error(vm, "key argument \"%s\" is not a string "
+                       "or Buffer-like object", njs_type_string(value->type));
 
         return NJS_ERROR;
     }
 
-    ctx = njs_mp_alloc(njs_vm_memory_pool(vm), sizeof(njs_hmac_t));
+    ctx = njs_mp_alloc(vm->mem_pool, sizeof(njs_hmac_t));
     if (njs_slow_path(ctx == NULL)) {
-        njs_vm_memory_error(vm);
+        njs_memory_error(vm);
         return NJS_ERROR;
     }
 
     ctx->alg = alg;
 
     if (key.length > sizeof(key_buf)) {
-        alg->init(&ctx->ctx);
-        alg->update(&ctx->ctx, key.start, key.length);
-        alg->final(digest, &ctx->ctx);
+        alg->init(&ctx->u);
+        alg->update(&ctx->u, key.start, key.length);
+        alg->final(digest, &ctx->u);
 
         memcpy(key_buf, digest, alg->size);
         njs_explicit_memzero(key_buf + alg->size, sizeof(key_buf) - alg->size);
@@ -570,26 +587,26 @@ njs_crypto_create_hmac(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
          key_buf[i] ^= 0x36;
     }
 
-    alg->init(&ctx->ctx);
-    alg->update(&ctx->ctx, key_buf, 64);
+    alg->init(&ctx->u);
+    alg->update(&ctx->u, key_buf, 64);
 
-    return njs_vm_external_create(vm, retval, njs_crypto_hmac_proto_id,
+    return njs_vm_external_create(vm, &vm->retval, njs_crypto_hmac_proto_id,
                                   ctx, 0);
 }
 
 
 static njs_hash_alg_t *
-njs_crypto_algorithm(njs_vm_t *vm, njs_value_t *value)
+njs_crypto_algorithm(njs_vm_t *vm, const njs_value_t *value)
 {
     njs_str_t       name;
     njs_hash_alg_t  *e;
 
-    if (njs_slow_path(!njs_value_is_string(value))) {
-        njs_vm_type_error(vm, "algorithm must be a string");
+    if (njs_slow_path(!njs_is_string(value))) {
+        njs_type_error(vm, "algorithm must be a string");
         return NULL;
     }
 
-    njs_value_string_get(vm, value, &name);
+    njs_string_get(value, &name);
 
     for (e = &njs_hash_algorithms[0]; e->name.length != 0; e++) {
         if (njs_strstr_eq(&name, &e->name)) {
@@ -597,28 +614,28 @@ njs_crypto_algorithm(njs_vm_t *vm, njs_value_t *value)
         }
     }
 
-    njs_vm_type_error(vm, "not supported algorithm: \"%V\"", &name);
+    njs_type_error(vm, "not supported algorithm: \"%V\"", &name);
 
     return NULL;
 }
 
 
 static njs_crypto_enc_t *
-njs_crypto_encoding(njs_vm_t *vm, njs_value_t *value)
+njs_crypto_encoding(njs_vm_t *vm, const njs_value_t *value)
 {
     njs_str_t         name;
     njs_crypto_enc_t  *e;
 
-    if (njs_slow_path(!njs_value_is_string(value))) {
-        if (!njs_value_is_undefined(value)) {
-            njs_vm_type_error(vm, "encoding must be a string");
+    if (njs_slow_path(!njs_is_string(value))) {
+        if (njs_is_defined(value)) {
+            njs_type_error(vm, "encoding must be a string");
             return NULL;
         }
 
         return &njs_encodings[0];
     }
 
-    njs_value_string_get(vm, value, &name);
+    njs_string_get(value, &name);
 
     for (e = &njs_encodings[1]; e->name.length != 0; e++) {
         if (njs_strstr_eq(&name, &e->name)) {
@@ -626,7 +643,7 @@ njs_crypto_encoding(njs_vm_t *vm, njs_value_t *value)
         }
     }
 
-    njs_vm_type_error(vm, "Unknown digest encoding: \"%V\"", &name);
+    njs_type_error(vm, "Unknown digest encoding: \"%V\"", &name);
 
     return NULL;
 }

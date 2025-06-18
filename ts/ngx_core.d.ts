@@ -1,4 +1,4 @@
-type NgxHeaders = Headers | Object | [NjsFixedSizeArray<2, string>];
+type NgxHeaders = Headers | Object | [NjsFixedSizeArray<2, NjsStringLike>];
 
 declare class Headers {
     /**
@@ -8,7 +8,7 @@ declare class Headers {
      * @param value A value of the header.
      * @since 0.7.10
      */
-    append(name:string, value: string): void;
+    append(name:NjsStringLike, value: NjsStringLike): void;
     /**
      * Headers constructors.
      *
@@ -16,38 +16,38 @@ declare class Headers {
      * @returns returns Headers object.
      * @since 0.7.10
      */
-    constructor(init?: Object | [NjsFixedSizeArray<2, string>]);
+    constructor(init?: Object | [NjsFixedSizeArray<2, NjsStringLike>]);
     /**
      * Deletes a header from the Headers object.
      * @param name A name of the header to be deleted.
      * @since 0.7.10
      */
-    delete(name:string): void;
+    delete(name:NjsStringLike): void;
     /**
      * Returns a string containing the values of all headers
      * with the specified name separated by a comma and a space.
      * @param name A name of the header.
      */
-    get(name:string): string;
+    get(name:NjsStringLike): NjsByteString;
     /**
      * Returns an array containing the values of all headers
      * with the specified name.
      * @param name A name of the header.
      */
-    getAll(name:string): Array<string>;
+    getAll(name:NjsStringLike): Array<NjsByteString>;
     /**
      * Executes a provided function once for each key/value
      * pair in the Headers object.
      * @param fn the function to be envoked.
      * @since 0.7.10
      */
-    forEach(fn:(name: string, value: string) => void): void;
+    forEach(fn:(name: NjsStringLike, value: NjsStringLike) => void): void;
     /**
      * Returns a boolean value indicating whether a header with
      * the specified name exists.
      * @param name A name of the header.
      */
-    has(name:string): boolean;
+    has(name:NjsStringLike): boolean;
     /**
      * Sets a new value for an existing header inside the Headers object,
      * or adds the header if it does not already exist.
@@ -55,14 +55,14 @@ declare class Headers {
      * @param value A value of the header.
      * @since 0.7.10
      */
-    set(name:string, value: string): void;
+    set(name:NjsStringLike, value: NjsStringLike): void;
 }
 
 interface NgxRequestOptions {
     /**
      * Request body, by default is empty.
      */
-    body?: string;
+    body?: NjsStringLike;
     /**
      * Cache mode, by default is "default".
      */
@@ -78,7 +78,7 @@ interface NgxRequestOptions {
     /**
      * Request method, by default the GET method is used.
      */
-    method?: string;
+    method?: NjsStringLike;
     /**
      * Mode, by default is "no-cors".
      */
@@ -97,19 +97,19 @@ declare class Request {
     /**
      * Cache mode.
      */
-    readonly cache: string;
+    readonly cache: NjsByteString;
     /**
      * Request constructors.
      *
      * @param init is an optional initialization object.
-     * @returns returns Request object.
+     * @returns returns Headers object.
      * @since 0.7.10
      */
-    constructor(input: string | Request, options?: NgxRequestOptions);
+    constructor(input: NjsStringLike | Request, options?: NgxRequestOptions);
     /**
      * Credentials.
      */
-    readonly credentials: string;
+    readonly credentials: NjsByteString;
     /**
      * Returns a Promise that resolves with an result of applying of
      * JSON.parse() to a body.
@@ -122,15 +122,15 @@ declare class Request {
     /**
      * Request mode.
      */
-    readonly mode: string;
+    readonly mode: NjsByteString;
     /**
      * Returns a Promise that resolves with an body as String.
      */
-    text(): Promise<string>;
+    text(): Promise<NjsByteString>;
     /**
      * Request url.
      */
-    readonly url: string;
+    readonly url: NjsByteString;
 }
 
 interface NgxResponseOptions {
@@ -145,7 +145,7 @@ interface NgxResponseOptions {
     /**
      * Response status test, '' by default.
      */
-    statusText?: string;
+    statusText?: NjsStringLike;
 }
 
 declare class Response {
@@ -162,10 +162,10 @@ declare class Response {
      * Response constructors.
      *
      * @param init is an optional initialization object.
-     * @returns returns Response object.
+     * @returns returns Headers object.
      * @since 0.7.10
      */
-    constructor(body?: string, options?: NgxResponseOptions);
+    constructor(body?: NjsStringLike, options?: NgxResponseOptions);
     /**
      * Takes a Response stream and reads it to completion.
      * Returns a Promise that resolves with the result of
@@ -193,27 +193,27 @@ declare class Response {
     /**
      * The status message corresponding to the status code.
      */
-    readonly statusText: string;
+    readonly statusText: NjsByteString;
     /**
      * Takes a Response stream and reads it to completion.
      * Returns a Promise that resolves with a string.
      */
-    text(): Promise<string>;
+    text(): Promise<NjsByteString>;
     /**
      * The type of the response.
      */
-    readonly type: string;
+    readonly type: NjsByteString;
     /**
      * Response url.
      */
-    readonly url: string;
+    readonly url: NjsByteString;
 }
 
 interface NgxFetchOptions {
     /**
      * Request body, by default is empty.
      */
-    body?: string,
+    body?: NjsStringLike,
     /**
      * The buffer size for reading the response, by default is 16384 (4096 before 0.7.4).
      * Nginx specific.
@@ -233,7 +233,7 @@ interface NgxFetchOptions {
     /**
      * Request method, by default the GET method is used.
      */
-    method?: string;
+    method?: NjsStringLike;
     /**
      * Enables or disables verification of the HTTPS server certificate,
      * by default is true.
@@ -242,192 +242,17 @@ interface NgxFetchOptions {
     verify?: boolean;
 }
 
-/**
- * This Error object is thrown when adding an item to a shared dictionary
- * that does not have enough free space.
- * @since 0.8.0
- */
-declare class SharedMemoryError extends Error {}
-
-type NgxSharedDictValue = string | number;
-type NgxKeyValuePair<V> = [string, V];
-
-/**
- * Interface of a dictionary shared among the working processes.
- * It can store either `string` or `number` values which is specified when
- * declaring the zone.
- *
- * @template {V} The type of stored values.
- * @since 0.8.0
- */
-interface NgxSharedDict<V extends string | number = string | number> {
-    /**
-     * The capacity of this shared dictionary in bytes.
-     */
-    readonly capacity: number;
-    /**
-     * The name of this shared dictionary.
-     */
-    readonly name: string;
-
-    /**
-     * Sets the `value` for the specified `key` in the dictionary only if the
-     * `key` does not exist yet.
-     *
-     * @param key The key of the item to add.
-     * @param value The value of the item to add.
-     * @param timeout Overrides the default timeout for this item in milliseconds.
-     * @returns `true` if the value has been added successfully, `false`
-     *   if the `key` already exists in this dictionary.
-     * @throws {SharedMemoryError} if there's not enough free space in this
-     *   dictionary.
-     * @throws {TypeError} if the `value` is of a different type than expected
-     *   by this dictionary.
-     */
-    add(key: string, value: V, timeout?: number): boolean;
-    /**
-     * Removes all items from this dictionary.
-     */
-    clear(): void;
-    /**
-     * Removes the item associated with the specified `key` from the dictionary.
-     *
-     * @param key The key of the item to remove.
-     * @returns `true` if the item in the dictionary existed and has been
-     *   removed, `false` otherwise.
-     */
-    delete(key: string): boolean;
-    /**
-     * Increments the value associated with the `key` by the given `delta`.
-     * If the `key` doesn't exist, the item will be initialized to `init`.
-     *
-     * **Important:** This method can be used only if the dictionary was
-     * declared with `type=number`!
-     *
-     * @param key is a string key.
-     * @param delta The number to increment/decrement the value by.
-     * @param init The number to initialize the item with if it didn't exist
-     *   (default is `0`).
-     * @param timeout Overrides the default timeout for this item in milliseconds.
-     * @returns The new value.
-     * @throws {SharedMemoryError} if there's not enough free space in this
-     *   dictionary.
-     * @throws {TypeError} if this dictionary does not expect numbers.
-     */
-    incr: V extends number
-      ? (key: string, delta: V, init?: number, timeout?: number) => number
-      : never;
-    /**
-     * @param maxCount The maximum number of pairs to retrieve (default is 1024).
-     * @returns An array of the key-value pairs.
-     */
-    items(maxCount?: number): NgxKeyValuePair<V>[];
-    /**
-     * @returns The free page size in bytes.
-     *   Note that even if the free page is zero the dictionary may still accept
-     *   new values if there is enough space in the occupied pages.
-     */
-    freeSpace(): number;
-    /**
-     * @param key The key of the item to retrieve.
-     * @returns The value associated with the `key`, or `undefined` if there
-     *   is none.
-     */
-    get(key: string): V | undefined;
-    /**
-     * @param key The key to search for.
-     * @returns `true` if an item with the specified `key` exists, `false`
-     *   otherwise.
-     */
-    has(key: string): boolean;
-    /**
-     * @param maxCount The maximum number of keys to retrieve (default is 1024).
-     * @returns An array of the dictionary keys.
-     */
-    keys(maxCount?: number): string[];
-    /**
-     * Removes the item associated with the specified `key` from the dictionary
-     * and returns its value.
-     *
-     * @param key The key of the item to remove.
-     * @returns The value associated with the `key`, or `undefined` if there
-     *   is none.
-     */
-    pop(key: string): V | undefined;
-     /**
-     * Sets the `value` for the specified `key` in the dictionary only if the
-     * `key` already exists.
-     *
-     * @param key The key of the item to replace.
-     * @param value The new value of the item.
-     * @returns `true` if the value has been replaced successfully, `false`
-     *   if the key doesn't exist in this dictionary.
-     * @throws {SharedMemoryError} if there's not enough free space in this
-     *   dictionary.
-     * @throws {TypeError} if the `value` is of a different type than expected
-     *   by this dictionary.
-     */
-    replace(key: string, value: V): boolean;
-    /**
-     * Sets the `value` for the specified `key` in the dictionary.
-     *
-     * @param key The key of the item to set.
-     * @param value The value of the item to set.
-     * @param timeout Overrides the default timeout for this item in milliseconds.
-     * @returns This dictionary (for method chaining).
-     * @throws {SharedMemoryError} if there's not enough free space in this
-     *   dictionary.
-     * @throws {TypeError} if the `value` is of a different type than expected
-     *   by this dictionary.
-     */
-    set(key: string, value: V, timeout?: number): this;
-    /**
-     * @returns The number of items in this shared dictionary.
-     */
-    size(): number;
-}
-
-interface NgxGlobalShared {
-    /**
-     * Shared dictionaries.
-     * @since 0.8.0
-     */
-    readonly [prop: string]: NgxSharedDict;
-}
-
 interface NgxObject {
-    /**
-     * A string containing an optional nginx build name, corresponds to the
-     * --build=name argument of the configure script, by default is ""
-     *  @since 0.8.0
-     */
-    readonly build: string;
-    /**
-     * A string containing the file path to current nginx configuration file
-     * @since 0.8.0
-     */
-    readonly conf_file_path: string;
-    /**
-     * A string containing the file path to directory where nginx is currently
-     * looking for configuration
-     * @since 0.7.8
-     */
-    readonly conf_prefix: string;
-    /**
-     * The error level constant for ngx.log() function.
-     * @since 0.5.1
-     */
+    readonly INFO: number;
+    readonly WARN: number;
     readonly ERR: number;
     /**
-     * A string containing the file path to the current error log file
-     * @since 0.8.0
+     * Writes a string to the error log with the specified level
+     * of logging.
+     * @param level Log level (ngx.INFO, ngx.WARN, ngx.ERR).
+     * @param message Message to log.
      */
-    readonly error_log_path: string;
-    /**
-     * The info level constant for ngx.log() function.
-     * @since 0.5.1
-     */
-    readonly INFO: number;
+    log(level: number, message: NjsStringOrBuffer): void;
     /**
      * Makes a request to fetch an URL.
      * Returns a Promise that resolves with the Response object.
@@ -437,46 +262,6 @@ interface NgxObject {
      * @since 0.5.1
      */
     fetch(init: NjsStringOrBuffer | Request, options?: NgxFetchOptions): Promise<Response>;
-    /**
-     * Writes a string to the error log with the specified level
-     * of logging.
-     * @param level Log level (ngx.INFO, ngx.WARN, ngx.ERR).
-     * @param message Message to log.
-     */
-    log(level: number, message: NjsStringOrBuffer): void;
-    /**
-     * A string containing the file path to a directory that keeps server files
-     * @since 0.8.0
-     */
-    readonly prefix: string;
-
-    /**
-     * An object containing shared data between all worker processes.
-     * @since 0.8.0
-     */
-    readonly shared: NgxGlobalShared;
-    /**
-     * A string containing nginx version, for example: "1.25.0"
-     * @since 0.8.0
-     */
-    readonly version: string;
-    /**
-     * A number containing nginx version, for example: 1025000
-     * @since 0.8.0
-     */
-    readonly version_number: number;
-    /**
-     * The warn level constant for ngx.log() function.
-     * @since 0.5.1
-     */
-    readonly WARN: number;
-    /**
-     * A number corresponding to the current worker process id.
-     * Can have values from 0 to worker_processes - 1.
-     * @since 0.8.0
-     */
-    readonly worker_id: number;
-
 }
 
 declare const ngx: NgxObject;

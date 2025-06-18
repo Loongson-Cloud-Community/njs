@@ -33,7 +33,7 @@ njs_array_buffer_alloc(njs_vm_t *vm, uint64_t size, njs_bool_t zeroing)
         goto memory_error;
     }
 
-    proto = njs_vm_proto(vm, NJS_OBJ_TYPE_ARRAY_BUFFER);
+    proto = &vm->prototypes[NJS_OBJ_TYPE_ARRAY_BUFFER].object;
 
     njs_lvlhsh_init(&array->object.hash);
     njs_lvlhsh_init(&array->object.shared_hash);
@@ -64,7 +64,7 @@ overflow:
 
 static njs_int_t
 njs_array_buffer_constructor(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+    njs_index_t unused)
 {
     uint64_t            size;
     njs_int_t           ret;
@@ -89,7 +89,7 @@ njs_array_buffer_constructor(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
         return NJS_ERROR;
     }
 
-    njs_set_array_buffer(retval, array);
+    njs_set_array_buffer(&vm->retval, array);
 
     return NJS_OK;
 }
@@ -97,9 +97,9 @@ njs_array_buffer_constructor(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
 
 static njs_int_t
 njs_array_buffer_get_this(njs_vm_t *vm, njs_value_t *args,
-    njs_uint_t nargs, njs_index_t unused, njs_value_t *retval)
+    njs_uint_t nargs, njs_index_t unused)
 {
-    njs_value_assign(retval, njs_argument(args, 0));
+    vm->retval = args[0];
 
     return NJS_OK;
 }
@@ -107,9 +107,9 @@ njs_array_buffer_get_this(njs_vm_t *vm, njs_value_t *args,
 
 static njs_int_t
 njs_array_buffer_is_view(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+    njs_index_t unused)
 {
-    njs_set_boolean(retval, njs_is_typed_array(njs_arg(args, nargs, 1)));
+    njs_set_boolean(&vm->retval, njs_is_typed_array(njs_arg(args, nargs, 1)));
 
     return NJS_OK;
 }
@@ -139,20 +139,23 @@ njs_array_buffer_writable(njs_vm_t *vm, njs_array_buffer_t *buffer)
 }
 
 
-static const njs_object_prop_init_t  njs_array_buffer_constructor_properties[] =
+static const njs_object_prop_t  njs_array_buffer_constructor_properties[] =
 {
-    NJS_DECLARE_PROP_LENGTH(1),
-
     NJS_DECLARE_PROP_NAME("ArrayBuffer"),
 
-    NJS_DECLARE_PROP_HANDLER(STRING_prototype, njs_object_prototype_create,
-                             0, 0),
+    NJS_DECLARE_PROP_LENGTH(1),
 
-    NJS_DECLARE_PROP_GETTER(SYMBOL_species,
-                            njs_array_buffer_get_this,
-                            0),
+    NJS_DECLARE_PROP_HANDLER("prototype", njs_object_prototype_create, 0, 0, 0),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_isView, njs_array_buffer_is_view, 1, 0),
+    {
+        .type = NJS_ACCESSOR,
+        .name = njs_wellknown_symbol(NJS_SYMBOL_SPECIES),
+        .u.accessor = njs_getter(njs_array_buffer_get_this, 0),
+        .writable = NJS_ATTRIBUTE_UNSET,
+        .configurable = 1,
+    },
+
+    NJS_DECLARE_PROP_NATIVE("isView", njs_array_buffer_is_view, 1, 0),
 };
 
 
@@ -164,7 +167,7 @@ const njs_object_init_t  njs_array_buffer_constructor_init = {
 
 static njs_int_t
 njs_array_buffer_prototype_byte_length(njs_vm_t *vm, njs_value_t *args,
-    njs_uint_t nargs, njs_index_t unused, njs_value_t *retval)
+    njs_uint_t nargs, njs_index_t unused)
 {
     njs_value_t         *value;
     njs_array_buffer_t  *array;
@@ -183,7 +186,7 @@ njs_array_buffer_prototype_byte_length(njs_vm_t *vm, njs_value_t *args,
         return NJS_ERROR;
     }
 
-    njs_set_number(retval, array->size);
+    njs_set_number(&vm->retval, array->size);
 
     return NJS_OK;
 }
@@ -191,7 +194,7 @@ njs_array_buffer_prototype_byte_length(njs_vm_t *vm, njs_value_t *args,
 
 static njs_int_t
 njs_array_buffer_prototype_slice(njs_vm_t *vm, njs_value_t *args,
-    njs_uint_t nargs, njs_index_t unused, njs_value_t *retval)
+    njs_uint_t nargs, njs_index_t unused)
 {
     int64_t             len, start, end;
     njs_int_t           ret;
@@ -231,51 +234,29 @@ njs_array_buffer_prototype_slice(njs_vm_t *vm, njs_value_t *args,
         return NJS_ERROR;
     }
 
-    njs_set_array_buffer(retval, buffer);
+    njs_set_array_buffer(&vm->retval, buffer);
 
     return NJS_OK;
 }
 
 
-njs_int_t
-njs_array_buffer_detach(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+static const njs_object_prop_t  njs_array_buffer_prototype_properties[] =
 {
-    njs_value_t         *value;
-    njs_array_buffer_t  *buffer;
+    NJS_DECLARE_PROP_HANDLER("constructor",
+                             njs_object_prototype_create_constructor,
+                             0, 0, NJS_OBJECT_PROP_VALUE_CW),
 
-    value = njs_arg(args, nargs, 1);
-    if (njs_slow_path(!njs_is_array_buffer(value))) {
-        njs_type_error(vm, "\"this\" is not an ArrayBuffer");
-        return NJS_ERROR;
-    }
-
-    buffer = njs_array_buffer(value);
-    buffer->u.data = NULL;
-    buffer->size = 0;
-
-    njs_set_null(retval);
-
-    return NJS_OK;
-}
-
-
-
-
-static const njs_object_prop_init_t  njs_array_buffer_prototype_properties[] =
-{
-    NJS_DECLARE_PROP_HANDLER(STRING_constructor,
-                             njs_object_prototype_create_constructor, 0,
-                             NJS_OBJECT_PROP_VALUE_CW),
-
-    NJS_DECLARE_PROP_GETTER(STRING_byteLength,
+    NJS_DECLARE_PROP_GETTER("byteLength",
                             njs_array_buffer_prototype_byte_length, 0),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_slice, njs_array_buffer_prototype_slice,
-                            2, 0),
+    NJS_DECLARE_PROP_NATIVE("slice", njs_array_buffer_prototype_slice, 2, 0),
 
-    NJS_DECLARE_PROP_VALUE(SYMBOL_toStringTag, njs_ascii_strval("ArrayBuffer"),
-                           NJS_OBJECT_PROP_VALUE_C),
+    {
+        .type = NJS_PROPERTY,
+        .name = njs_wellknown_symbol(NJS_SYMBOL_TO_STRING_TAG),
+        .u.value = njs_string("ArrayBuffer"),
+        .configurable = 1,
+    },
 };
 
 

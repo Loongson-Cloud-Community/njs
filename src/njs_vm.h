@@ -76,7 +76,6 @@ typedef enum {
     NJS_OBJ_TYPE_URI_ERROR,
     NJS_OBJ_TYPE_MEMORY_ERROR,
     NJS_OBJ_TYPE_AGGREGATE_ERROR,
-#define NJS_OBJ_TYPE_ERROR_MAX         (NJS_OBJ_TYPE_AGGREGATE_ERROR)
 
     NJS_OBJ_TYPE_MAX,
 } njs_object_type_t;
@@ -96,6 +95,9 @@ enum njs_object_e {
     NJS_OBJECT_PROCESS,
     NJS_OBJECT_MATH,
     NJS_OBJECT_JSON,
+#ifdef NJS_TEST262
+    NJS_OBJECT_262,
+#endif
     NJS_OBJECT_MAX
 };
 
@@ -116,8 +118,10 @@ typedef enum {
 
 
 struct njs_vm_s {
-    njs_value_t              exception;
+    /* njs_vm_t must be aligned to njs_value_t due to scratch value. */
+    njs_value_t              retval;
 
+    njs_arr_t                *paths;
     njs_arr_t                *protos;
 
     njs_arr_t                *scope_absolute;
@@ -128,28 +132,26 @@ struct njs_vm_s {
     njs_native_frame_t       *top_frame;
     njs_frame_t              *active_frame;
 
-    njs_lvlhsh_t             atom_hash_shared;
-    njs_lvlhsh_t             atom_hash;
-    njs_lvlhsh_t             *atom_hash_current;
-    uint32_t                 shared_atom_count;
-    uint32_t                 atom_id_generator;
-
+    njs_lvlhsh_t             keywords_hash;
     njs_lvlhsh_t             values_hash;
 
     njs_arr_t                *modules;
     njs_lvlhsh_t             modules_hash;
 
     uint32_t                 event_id;
-    njs_queue_t              jobs;
+    njs_lvlhsh_t             events_hash;
+    njs_queue_t              posted_events;
+    njs_queue_t              promise_events;
 
     njs_vm_opt_t             options;
 
-#define njs_vm_proto(vm, index) (&(vm)->prototypes[index].object)
-#define njs_vm_ctor(vm, index) ((vm)->constructors[index])
-
-    njs_object_prototype_t   *prototypes;
-    njs_function_t           *constructors;
-    size_t                   constructors_size;
+    /*
+     * The prototypes and constructors arrays must be together because
+     * they are copied from njs_vm_shared_t by single memcpy()
+     * in njs_builtin_objects_clone().
+     */
+    njs_object_prototype_t   prototypes[NJS_OBJ_TYPE_MAX];
+    njs_function_t           constructors[NJS_OBJ_TYPE_MAX];
 
     njs_function_t           *hooks[NJS_HOOK_MAX];
 
@@ -164,13 +166,15 @@ struct njs_vm_s {
     njs_regex_compile_ctx_t  *regex_compile_ctx;
     njs_regex_match_data_t   *single_match_data;
 
+    njs_array_t              *promise_reason;
+
     njs_parser_scope_t       *global_scope;
 
     /*
      * MemoryError is statically allocated immutable Error object
      * with the InternalError prototype.
      */
-    njs_object_value_t       memory_error_object;
+    njs_object_t             memory_error_object;
 
     njs_object_t             string_object;
     njs_object_t             global_object;
@@ -183,11 +187,7 @@ struct njs_vm_s {
     njs_random_t             random;
 
     njs_rbtree_t             global_symbols;
-
-    njs_module_loader_t      module_loader;
-    void                     *module_loader_opaque;
-    njs_rejection_tracker_t  rejection_tracker;
-    void                     *rejection_tracker_opaque;
+    uint64_t                 symbol_generator;
 };
 
 
@@ -207,51 +207,50 @@ typedef struct {
 
 
 struct njs_vm_shared_s {
+    njs_lvlhsh_t             keywords_hash;
     njs_lvlhsh_t             values_hash;
 
-    njs_flathsh_t            array_instance_hash;
-    njs_flathsh_t            string_instance_hash;
-    njs_flathsh_t            function_instance_hash;
-    njs_flathsh_t            async_function_instance_hash;
-    njs_flathsh_t            arrow_instance_hash;
-    njs_flathsh_t            arguments_object_instance_hash;
-    njs_flathsh_t            regexp_instance_hash;
+    njs_lvlhsh_t             array_instance_hash;
+    njs_lvlhsh_t             string_instance_hash;
+    njs_lvlhsh_t             function_instance_hash;
+    njs_lvlhsh_t             async_function_instance_hash;
+    njs_lvlhsh_t             arrow_instance_hash;
+    njs_lvlhsh_t             arguments_object_instance_hash;
+    njs_lvlhsh_t             regexp_instance_hash;
 
     size_t                   module_items;
     njs_lvlhsh_t             modules_hash;
 
-    njs_flathsh_t            env_hash;
+    njs_lvlhsh_t             env_hash;
 
     njs_object_t             string_object;
     njs_object_t             objects[NJS_OBJECT_MAX];
 
-#define njs_shared_ctor(shared, index)                                       \
-    ((njs_function_t *) njs_arr_item((shared)->constructors, index))
-
-#define njs_shared_prototype(shared, index)                                  \
-    ((njs_object_prototype_t *) njs_arr_item((shared)->prototypes, index))
-
-    njs_arr_t                *constructors; /* of njs_function_t */
-    njs_arr_t                *prototypes; /* of njs_object_prototype_t */
-
     njs_exotic_slots_t       global_slots;
+
+    /*
+     * The prototypes and constructors arrays must be togther because they are
+     * copied to njs_vm_t by single memcpy() in njs_builtin_objects_clone().
+     */
+    njs_object_prototype_t   prototypes[NJS_OBJ_TYPE_MAX];
+    njs_function_t           constructors[NJS_OBJ_TYPE_MAX];
 
     njs_regexp_pattern_t     *empty_regexp_pattern;
 };
 
 
-njs_int_t njs_vm_runtime_init(njs_vm_t *vm);
-njs_int_t njs_vm_ctor_push(njs_vm_t *vm);
-void njs_vm_constructors_init(njs_vm_t *vm);
-njs_value_t njs_vm_exception(njs_vm_t *vm);
-void njs_vm_scopes_restore(njs_vm_t *vm, njs_native_frame_t *frame);
+void njs_vm_scopes_restore(njs_vm_t *vm, njs_native_frame_t *frame,
+    njs_native_frame_t *previous);
 
 njs_int_t njs_builtin_objects_create(njs_vm_t *vm);
+njs_int_t njs_builtin_objects_clone(njs_vm_t *vm, njs_value_t *global);
 njs_int_t njs_builtin_match_native_function(njs_vm_t *vm,
     njs_function_t *function, njs_str_t *name);
 
 void njs_disassemble(u_char *start, u_char *end, njs_int_t count,
     njs_arr_t *lines);
+
+njs_arr_t *njs_vm_completions(njs_vm_t *vm, njs_str_t *expression);
 
 void *njs_lvlhsh_alloc(void *data, size_t size);
 void njs_lvlhsh_free(void *data, void *p, size_t size);
@@ -264,7 +263,7 @@ extern const njs_str_t    njs_entry_native;
 extern const njs_str_t    njs_entry_unknown;
 extern const njs_str_t    njs_entry_anonymous;
 
-extern const njs_flathsh_proto_t  njs_object_hash_proto;
+extern const njs_lvlhsh_proto_t  njs_object_hash_proto;
 
 
 #endif /* _NJS_VM_H_INCLUDED_ */

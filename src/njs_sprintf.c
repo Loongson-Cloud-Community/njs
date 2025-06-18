@@ -95,8 +95,8 @@ njs_vsprintf(u_char *buf, u_char *end, const char *fmt, va_list args)
     njs_bool_t     sign;
     njs_sprintf_t  spf;
 
-    static const u_char  hexadecimal[] = "0123456789abcdef";
-    static const u_char  HEXADECIMAL[] = "0123456789ABCDEF";
+    static const u_char  hexadecimal[16] = "0123456789abcdef";
+    static const u_char  HEXADECIMAL[16] = "0123456789ABCDEF";
     static const u_char  nan[] = "[nan]";
     static const u_char  infinity[] = "[infinity]";
 
@@ -522,12 +522,12 @@ njs_integer(njs_sprintf_t *spf, u_char *buf, uint64_t ui64)
         } while (ui64 != 0);
     }
 
-    length = (temp + NJS_INT64_T_LEN) - p;
-
     /* Zero or space padding. */
 
-    if (length < spf->width) {
-        end = buf + spf->width - length;
+    if (spf->width != 0) {
+
+        length = (temp + NJS_INT64_T_LEN) - p;
+        end = buf + (spf->width - length);
         end = njs_min(end, spf->end);
 
         while (buf < end) {
@@ -537,6 +537,7 @@ njs_integer(njs_sprintf_t *spf, u_char *buf, uint64_t ui64)
 
     /* Number copying. */
 
+    length = (temp + NJS_INT64_T_LEN) - p;
     end = buf + length;
     end = njs_min(end, spf->end);
 

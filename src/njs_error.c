@@ -9,15 +9,6 @@
 
 
 typedef struct {
-    union {
-        njs_function_t                *function;
-        u_char                        *pc;
-    } u;
-    uint8_t                           native;
-} njs_stack_entry_t;
-
-
-typedef struct {
     njs_str_t                         name;
     njs_str_t                         file;
     uint32_t                          line;
@@ -25,52 +16,42 @@ typedef struct {
 
 
 static njs_int_t njs_add_backtrace_entry(njs_vm_t *vm, njs_arr_t *stack,
-    njs_stack_entry_t *se);
+    njs_native_frame_t *native_frame);
 static njs_int_t njs_backtrace_to_string(njs_vm_t *vm, njs_arr_t *backtrace,
     njs_str_t *dst);
 
 
+static const njs_value_t  njs_error_message_string = njs_string("message");
+static const njs_value_t  njs_error_name_string = njs_string("name");
+static const njs_value_t  njs_error_stack_string = njs_string("stack");
+static const njs_value_t  njs_error_errors_string = njs_string("errors");
+
+
 void
-njs_error_new(njs_vm_t *vm, njs_value_t *dst, njs_object_t *proto,
+njs_error_new(njs_vm_t *vm, njs_value_t *dst, njs_object_type_t type,
     u_char *start, size_t size)
 {
+    ssize_t        length;
     njs_int_t     ret;
     njs_value_t   string;
     njs_object_t  *error;
 
-    ret = njs_string_create(vm, &string, start, size);
+    length = njs_utf8_length(start, size);
+    if (njs_slow_path(length < 0)) {
+        length = 0;
+    }
+
+    ret = njs_string_new(vm, &string, start, size, length);
     if (njs_slow_path(ret != NJS_OK)) {
         return;
     }
 
-    error = njs_error_alloc(vm, proto, NULL, &string, NULL);
+    error = njs_error_alloc(vm, type, NULL, &string, NULL);
     if (njs_slow_path(error == NULL)) {
         return;
     }
 
     njs_set_object(dst, error);
-}
-
-void
-njs_throw_error_va(njs_vm_t *vm, njs_object_t *proto, const char *fmt,
-    va_list args)
-{
-    u_char   buf[NJS_MAX_ERROR_STR], *p;
-
-    p = njs_vsprintf(buf, buf + sizeof(buf), fmt, args);
-
-    njs_error_new(vm, &vm->exception, proto, buf, p - buf);
-}
-
-
-void
-njs_throw_error(njs_vm_t *vm, njs_object_type_t type, const char *fmt, ...)
-{
-    va_list  args;
-
-    va_start(args, fmt);
-    njs_throw_error_va(vm, njs_vm_proto(vm, type), fmt, args);
-    va_end(args);
 }
 
 
@@ -81,22 +62,35 @@ njs_error_fmt_new(njs_vm_t *vm, njs_value_t *dst, njs_object_type_t type,
     va_list  args;
     u_char   buf[NJS_MAX_ERROR_STR], *p;
 
-    va_start(args, fmt);
-    p = njs_vsprintf(buf, buf + sizeof(buf), fmt, args);
-    va_end(args);
+    p = buf;
 
-    njs_error_new(vm, dst, njs_vm_proto(vm, type), buf, p - buf);
+    if (fmt != NULL) {
+        va_start(args, fmt);
+        p = njs_vsprintf(buf, buf + sizeof(buf), fmt, args);
+        va_end(args);
+    }
+
+    njs_error_new(vm, dst, type, buf, p - buf);
 }
 
 
 static njs_int_t
-njs_error_stack_new(njs_vm_t *vm, njs_object_value_t *error)
+njs_error_stack_new(njs_vm_t *vm, njs_object_t *error, njs_value_t *retval)
 {
+    njs_int_t           ret;
+    njs_str_t           string;
     njs_arr_t           *stack;
-    njs_stack_entry_t   *se;
+    njs_value_t         value;
     njs_native_frame_t  *frame;
 
-    stack = njs_arr_create(vm->mem_pool, 4, sizeof(njs_stack_entry_t));
+    njs_set_object(&value, error);
+
+    ret = njs_error_to_string(vm, retval, &value);
+    if (njs_slow_path(ret != NJS_OK)) {
+        return ret;
+    }
+
+    stack = njs_arr_create(vm->mem_pool, 4, sizeof(njs_backtrace_entry_t));
     if (njs_slow_path(stack == NULL)) {
         return NJS_ERROR;
     }
@@ -104,20 +98,10 @@ njs_error_stack_new(njs_vm_t *vm, njs_object_value_t *error)
     frame = vm->top_frame;
 
     for ( ;; ) {
-        if (frame->native || frame->pc != NULL) {
-            se = njs_arr_add(stack);
-            if (njs_slow_path(se == NULL)) {
-                return NJS_ERROR;
-            }
-
-            se->native = frame->native;
-
-            if (se->native) {
-                se->u.function = frame->function;
-
-            } else {
-                se->u.pc = frame->pc;
-            }
+        if ((frame->native || frame->pc != NULL)
+            && njs_add_backtrace_entry(vm, stack, frame) != NJS_OK)
+        {
+            break;
         }
 
         frame = frame->previous;
@@ -127,19 +111,28 @@ njs_error_stack_new(njs_vm_t *vm, njs_object_value_t *error)
         }
     }
 
-    njs_data(&error->value) = stack;
+    njs_string_get(retval, &string);
 
-    return NJS_OK;
+    ret = njs_backtrace_to_string(vm, stack, &string);
+
+    njs_arr_destroy(stack);
+
+    if (njs_slow_path(ret != NJS_OK)) {
+        return ret;
+    }
+
+    return njs_string_set(vm, retval, string.start, string.length);
 }
 
 
 njs_int_t
-njs_error_stack_attach(njs_vm_t *vm, njs_value_t value)
+njs_error_stack_attach(njs_vm_t *vm, njs_value_t *value)
 {
-    njs_int_t  ret;
+    njs_int_t    ret;
+    njs_value_t  stack;
 
-    if (njs_slow_path(!njs_is_error(&value))
-        || njs_object(&value)->stack_attached)
+    if (njs_slow_path(!njs_is_error(value))
+        || njs_object(value)->stack_attached)
     {
         return NJS_DECLINED;
     }
@@ -148,15 +141,18 @@ njs_error_stack_attach(njs_vm_t *vm, njs_value_t value)
         return NJS_OK;
     }
 
-    ret = njs_error_stack_new(vm, value.data.u.object_value);
+    ret = njs_error_stack_new(vm, njs_object(value), &stack);
     if (njs_slow_path(ret != NJS_OK)) {
         njs_internal_error(vm, "njs_error_stack_new() failed");
         return NJS_ERROR;
     }
 
-    njs_object(&value)->stack_attached = 1;
+    njs_object(value)->stack_attached = 1;
 
-    return NJS_OK;
+    return njs_object_prop_define(vm, value,
+                                  njs_value_arg(&njs_error_stack_string),
+                                  &stack, NJS_OBJECT_PROP_VALUE_CW,
+                                  NJS_STACK_HASH);
 }
 
 
@@ -165,7 +161,8 @@ njs_error_stack(njs_vm_t *vm, njs_value_t *value, njs_value_t *stack)
 {
     njs_int_t  ret;
 
-    ret = njs_value_property(vm, value, NJS_ATOM_STRING_stack, stack);
+    ret = njs_value_property(vm, value, njs_value_arg(&njs_error_stack_string),
+                             stack);
     if (njs_slow_path(ret != NJS_OK)) {
         return ret;
     }
@@ -179,32 +176,28 @@ njs_error_stack(njs_vm_t *vm, njs_value_t *value, njs_value_t *stack)
 
 
 njs_object_t *
-njs_error_alloc(njs_vm_t *vm, njs_object_t *proto, const njs_value_t *name,
+njs_error_alloc(njs_vm_t *vm, njs_object_type_t type, const njs_value_t *name,
     const njs_value_t *message, const njs_value_t *errors)
 {
-    njs_int_t            ret;
-    njs_object_t         *error;
-    njs_object_prop_t    *prop;
-    njs_object_value_t   *ov;
-    njs_flathsh_query_t  lhq;
+    njs_int_t           ret;
+    njs_object_t        *error;
+    njs_object_prop_t   *prop;
+    njs_lvlhsh_query_t  lhq;
 
-    ov = njs_mp_alloc(vm->mem_pool, sizeof(njs_object_value_t));
-    if (njs_slow_path(ov == NULL)) {
+    error = njs_mp_alloc(vm->mem_pool, sizeof(njs_object_t));
+    if (njs_slow_path(error == NULL)) {
         goto memory_error;
     }
 
-    njs_set_data(&ov->value, NULL, NJS_DATA_TAG_ANY);
-
-    error = &ov->object;
     njs_lvlhsh_init(&error->hash);
     njs_lvlhsh_init(&error->shared_hash);
-    error->type = NJS_OBJECT_VALUE;
+    error->type = NJS_OBJECT;
     error->shared = 0;
     error->extensible = 1;
     error->fast_array = 0;
     error->error_data = 1;
     error->stack_attached = 0;
-    error->__proto__ = proto;
+    error->__proto__ = &vm->prototypes[type].object;
     error->slots = NULL;
 
     lhq.replace = 0;
@@ -212,15 +205,17 @@ njs_error_alloc(njs_vm_t *vm, njs_object_t *proto, const njs_value_t *name,
     lhq.proto = &njs_object_hash_proto;
 
     if (name != NULL) {
-        prop = njs_object_prop_alloc(vm, name, 1);
+        lhq.key = njs_str_value("name");
+        lhq.key_hash = NJS_NAME_HASH;
+
+        prop = njs_object_prop_alloc(vm, &njs_error_name_string, name, 1);
         if (njs_slow_path(prop == NULL)) {
             goto memory_error;
         }
 
         lhq.value = prop;
-        lhq.key_hash = NJS_ATOM_STRING_name;
 
-        ret = njs_flathsh_unique_insert(&error->hash, &lhq);
+        ret = njs_lvlhsh_insert(&error->hash, &lhq);
         if (njs_slow_path(ret != NJS_OK)) {
             njs_internal_error(vm, "lvlhsh insert failed");
             return NULL;
@@ -228,7 +223,10 @@ njs_error_alloc(njs_vm_t *vm, njs_object_t *proto, const njs_value_t *name,
     }
 
     if (message!= NULL) {
-        prop = njs_object_prop_alloc(vm, message, 1);
+        lhq.key = njs_str_value("message");
+        lhq.key_hash = NJS_MESSAGE_HASH;
+
+        prop = njs_object_prop_alloc(vm, &njs_error_message_string, message, 1);
         if (njs_slow_path(prop == NULL)) {
             goto memory_error;
         }
@@ -236,9 +234,8 @@ njs_error_alloc(njs_vm_t *vm, njs_object_t *proto, const njs_value_t *name,
         prop->enumerable = 0;
 
         lhq.value = prop;
-        lhq.key_hash = NJS_ATOM_STRING_message;
 
-        ret = njs_flathsh_unique_insert(&error->hash, &lhq);
+        ret = njs_lvlhsh_insert(&error->hash, &lhq);
         if (njs_slow_path(ret != NJS_OK)) {
             njs_internal_error(vm, "lvlhsh insert failed");
             return NULL;
@@ -246,7 +243,10 @@ njs_error_alloc(njs_vm_t *vm, njs_object_t *proto, const njs_value_t *name,
     }
 
     if (errors != NULL) {
-        prop = njs_object_prop_alloc(vm, errors, 1);
+        lhq.key = njs_str_value("errors");
+        lhq.key_hash = NJS_ERRORS_HASH;
+
+        prop = njs_object_prop_alloc(vm, &njs_error_errors_string, errors, 1);
         if (njs_slow_path(prop == NULL)) {
             goto memory_error;
         }
@@ -254,9 +254,8 @@ njs_error_alloc(njs_vm_t *vm, njs_object_t *proto, const njs_value_t *name,
         prop->enumerable = 0;
 
         lhq.value = prop;
-        lhq.key_hash = NJS_ATOM_STRING_errors;
 
-        ret = njs_flathsh_unique_insert(&error->hash, &lhq);
+        ret = njs_lvlhsh_insert(&error->hash, &lhq);
         if (njs_slow_path(ret != NJS_OK)) {
             njs_internal_error(vm, "lvlhsh insert failed");
             return NULL;
@@ -273,9 +272,9 @@ memory_error:
 }
 
 
-njs_int_t
+static njs_int_t
 njs_error_constructor(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t type, njs_value_t *retval)
+    njs_index_t type)
 {
     njs_int_t     ret;
     njs_value_t   *iterator, *value, list;
@@ -297,7 +296,7 @@ njs_error_constructor(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
             return NJS_ERROR;
         }
 
-        array = njs_iterator_to_array(vm, iterator, retval);
+        array = njs_iterator_to_array(vm, iterator);
         if (njs_slow_path(array == NULL)) {
             return NJS_ERROR;
         }
@@ -314,27 +313,26 @@ njs_error_constructor(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
         }
     }
 
-    error = njs_error_alloc(vm, njs_vm_proto(vm, type), NULL,
+    error = njs_error_alloc(vm, type, NULL,
                             njs_is_defined(value) ? value : NULL,
                             njs_is_defined(&list) ? &list : NULL);
     if (njs_slow_path(error == NULL)) {
         return NJS_ERROR;
     }
 
-    njs_set_object(retval, error);
+    njs_set_object(&vm->retval, error);
 
     return NJS_OK;
 }
 
 
-static const njs_object_prop_init_t  njs_error_constructor_properties[] =
+static const njs_object_prop_t  njs_error_constructor_properties[] =
 {
-    NJS_DECLARE_PROP_LENGTH(1),
-
     NJS_DECLARE_PROP_NAME("Error"),
 
-    NJS_DECLARE_PROP_HANDLER(STRING_prototype, njs_object_prototype_create,
-                             0, 0),
+    NJS_DECLARE_PROP_LENGTH(1),
+
+    NJS_DECLARE_PROP_HANDLER("prototype", njs_object_prototype_create, 0, 0, 0),
 };
 
 
@@ -344,14 +342,13 @@ const njs_object_init_t  njs_error_constructor_init = {
 };
 
 
-static const njs_object_prop_init_t  njs_eval_error_constructor_properties[] =
+static const njs_object_prop_t  njs_eval_error_constructor_properties[] =
 {
-    NJS_DECLARE_PROP_LENGTH(1),
-
     NJS_DECLARE_PROP_NAME("EvalError"),
 
-    NJS_DECLARE_PROP_HANDLER(STRING_prototype, njs_object_prototype_create,
-                             0, 0),
+    NJS_DECLARE_PROP_LENGTH(1),
+
+    NJS_DECLARE_PROP_HANDLER("prototype", njs_object_prototype_create, 0, 0, 0),
 };
 
 
@@ -361,14 +358,13 @@ const njs_object_init_t  njs_eval_error_constructor_init = {
 };
 
 
-static const njs_object_prop_init_t  njs_internal_error_constructor_properties[] =
+static const njs_object_prop_t  njs_internal_error_constructor_properties[] =
 {
-    NJS_DECLARE_PROP_LENGTH(1),
-
     NJS_DECLARE_PROP_NAME("InternalError"),
 
-    NJS_DECLARE_PROP_HANDLER(STRING_prototype, njs_object_prototype_create,
-                             0, 0),
+    NJS_DECLARE_PROP_LENGTH(1),
+
+    NJS_DECLARE_PROP_HANDLER("prototype", njs_object_prototype_create, 0, 0, 0),
 };
 
 
@@ -378,14 +374,13 @@ const njs_object_init_t  njs_internal_error_constructor_init = {
 };
 
 
-static const njs_object_prop_init_t  njs_range_error_constructor_properties[] =
+static const njs_object_prop_t  njs_range_error_constructor_properties[] =
 {
-    NJS_DECLARE_PROP_LENGTH(1),
-
     NJS_DECLARE_PROP_NAME("RangeError"),
 
-    NJS_DECLARE_PROP_HANDLER(STRING_prototype, njs_object_prototype_create,
-                             0, 0),
+    NJS_DECLARE_PROP_LENGTH(1),
+
+    NJS_DECLARE_PROP_HANDLER("prototype", njs_object_prototype_create, 0, 0, 0),
 };
 
 
@@ -395,14 +390,13 @@ const njs_object_init_t  njs_range_error_constructor_init = {
 };
 
 
-static const njs_object_prop_init_t  njs_reference_error_constructor_properties[] =
+static const njs_object_prop_t  njs_reference_error_constructor_properties[] =
 {
-    NJS_DECLARE_PROP_LENGTH(1),
-
     NJS_DECLARE_PROP_NAME("ReferenceError"),
 
-    NJS_DECLARE_PROP_HANDLER(STRING_prototype, njs_object_prototype_create,
-                             0, 0),
+    NJS_DECLARE_PROP_LENGTH(1),
+
+    NJS_DECLARE_PROP_HANDLER("prototype", njs_object_prototype_create, 0, 0, 0),
 };
 
 
@@ -412,14 +406,13 @@ const njs_object_init_t  njs_reference_error_constructor_init = {
 };
 
 
-static const njs_object_prop_init_t  njs_syntax_error_constructor_properties[] =
+static const njs_object_prop_t  njs_syntax_error_constructor_properties[] =
 {
-    NJS_DECLARE_PROP_LENGTH(1),
-
     NJS_DECLARE_PROP_NAME("SyntaxError"),
 
-    NJS_DECLARE_PROP_HANDLER(STRING_prototype, njs_object_prototype_create,
-                             0, 0),
+    NJS_DECLARE_PROP_LENGTH(1),
+
+    NJS_DECLARE_PROP_HANDLER("prototype", njs_object_prototype_create, 0, 0, 0),
 };
 
 
@@ -429,14 +422,13 @@ const njs_object_init_t  njs_syntax_error_constructor_init = {
 };
 
 
-static const njs_object_prop_init_t  njs_type_error_constructor_properties[] =
+static const njs_object_prop_t  njs_type_error_constructor_properties[] =
 {
-    NJS_DECLARE_PROP_LENGTH(1),
-
     NJS_DECLARE_PROP_NAME("TypeError"),
 
-    NJS_DECLARE_PROP_HANDLER(STRING_prototype, njs_object_prototype_create,
-                             0, 0),
+    NJS_DECLARE_PROP_LENGTH(1),
+
+    NJS_DECLARE_PROP_HANDLER("prototype", njs_object_prototype_create, 0, 0, 0),
 };
 
 
@@ -446,14 +438,13 @@ const njs_object_init_t  njs_type_error_constructor_init = {
 };
 
 
-static const njs_object_prop_init_t  njs_uri_error_constructor_properties[] =
+static const njs_object_prop_t  njs_uri_error_constructor_properties[] =
 {
-    NJS_DECLARE_PROP_LENGTH(1),
-
     NJS_DECLARE_PROP_NAME("URIError"),
 
-    NJS_DECLARE_PROP_HANDLER(STRING_prototype, njs_object_prototype_create,
-                             0, 0),
+    NJS_DECLARE_PROP_LENGTH(1),
+
+    NJS_DECLARE_PROP_HANDLER("prototype", njs_object_prototype_create, 0, 0, 0),
 };
 
 
@@ -463,14 +454,13 @@ const njs_object_init_t  njs_uri_error_constructor_init = {
 };
 
 
-static const njs_object_prop_init_t  njs_aggregate_error_constructor_properties[] =
+static const njs_object_prop_t  njs_aggregate_error_constructor_properties[] =
 {
-    NJS_DECLARE_PROP_LENGTH(1),
-
     NJS_DECLARE_PROP_NAME("AggregateError"),
 
-    NJS_DECLARE_PROP_HANDLER(STRING_prototype, njs_object_prototype_create,
-                             0, 0),
+    NJS_DECLARE_PROP_LENGTH(1),
+
+    NJS_DECLARE_PROP_HANDLER("prototype", njs_object_prototype_create, 0, 0, 0),
 };
 
 
@@ -483,18 +473,17 @@ const njs_object_init_t  njs_aggregate_error_constructor_init = {
 void
 njs_memory_error_set(njs_vm_t *vm, njs_value_t *value)
 {
-    njs_object_t        *object;
-    njs_object_value_t  *ov;
+    njs_object_t            *object;
+    njs_object_prototype_t  *prototypes;
 
-    ov = &vm->memory_error_object;
-    njs_set_data(&ov->value, NULL, NJS_DATA_TAG_ANY);
+    prototypes = vm->prototypes;
+    object = &vm->memory_error_object;
 
-    object = &ov->object;
     njs_lvlhsh_init(&object->hash);
     njs_lvlhsh_init(&object->shared_hash);
-    object->__proto__ = njs_vm_proto(vm, NJS_OBJ_TYPE_INTERNAL_ERROR);
+    object->__proto__ = &prototypes[NJS_OBJ_TYPE_INTERNAL_ERROR].object;
     object->slots = NULL;
-    object->type = NJS_OBJECT_VALUE;
+    object->type = NJS_OBJECT;
     object->shared = 1;
 
     /*
@@ -512,15 +501,15 @@ njs_memory_error_set(njs_vm_t *vm, njs_value_t *value)
 void
 njs_memory_error(njs_vm_t *vm)
 {
-    njs_memory_error_set(vm, &vm->exception);
+    njs_memory_error_set(vm, &vm->retval);
 }
 
 
 static njs_int_t
 njs_memory_error_constructor(njs_vm_t *vm, njs_value_t *args,
-    njs_uint_t nargs, njs_index_t unused, njs_value_t *retval)
+    njs_uint_t nargs, njs_index_t unused)
 {
-    njs_memory_error_set(vm, retval);
+    njs_memory_error_set(vm, &vm->retval);
 
     return NJS_OK;
 }
@@ -528,8 +517,7 @@ njs_memory_error_constructor(njs_vm_t *vm, njs_value_t *args,
 
 static njs_int_t
 njs_memory_error_prototype_create(njs_vm_t *vm, njs_object_prop_t *prop,
-    uint32_t unused, njs_value_t *value, njs_value_t *setval,
-    njs_value_t *retval)
+    njs_value_t *value, njs_value_t *setval, njs_value_t *retval)
 {
     int32_t            index;
     njs_function_t     *function;
@@ -541,7 +529,7 @@ njs_memory_error_prototype_create(njs_vm_t *vm, njs_object_prop_t *prop,
 
     function = njs_function(value);
     proto = njs_property_prototype_create(vm, &function->object.hash,
-                                          njs_vm_proto(vm, index));
+                                          &vm->prototypes[index].object);
     if (proto == NULL) {
         proto = &njs_value_undefined;
     }
@@ -552,14 +540,14 @@ njs_memory_error_prototype_create(njs_vm_t *vm, njs_object_prop_t *prop,
 }
 
 
-static const njs_object_prop_init_t  njs_memory_error_constructor_properties[] =
+static const njs_object_prop_t  njs_memory_error_constructor_properties[] =
 {
-    NJS_DECLARE_PROP_LENGTH(1),
-
     NJS_DECLARE_PROP_NAME("MemoryError"),
 
-    NJS_DECLARE_PROP_HANDLER(STRING_prototype,
-                             njs_memory_error_prototype_create, 0, 0),
+    NJS_DECLARE_PROP_LENGTH(1),
+
+    NJS_DECLARE_PROP_HANDLER("prototype", njs_memory_error_prototype_create,
+                             0, 0, 0),
 };
 
 
@@ -571,9 +559,9 @@ const njs_object_init_t  njs_memory_error_constructor_init = {
 
 static njs_int_t
 njs_error_prototype_value_of(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+    njs_index_t unused)
 {
-    njs_value_assign(retval, njs_argument(args, 0));
+    vm->retval = args[0];
 
     return NJS_OK;
 }
@@ -583,12 +571,16 @@ static njs_int_t
 njs_error_to_string2(njs_vm_t *vm, njs_value_t *retval,
     const njs_value_t *error, njs_bool_t want_stack)
 {
-    size_t             length;
-    u_char             *p;
-    njs_int_t          ret;
-    njs_value_t        value1, value2;
-    njs_value_t        *name_value, *message_value;
-    njs_string_prop_t  name, message;
+    size_t              length;
+    u_char              *p;
+    njs_int_t           ret;
+    njs_object_t        *error_object;
+    njs_value_t         value1, value2;
+    njs_value_t         *name_value, *message_value;
+    njs_string_prop_t   name, message;
+    njs_lvlhsh_query_t  lhq;
+
+    static const njs_value_t  default_name = njs_string("Error");
 
     njs_assert(njs_is_object(error));
 
@@ -603,38 +595,40 @@ njs_error_to_string2(njs_vm_t *vm, njs_value_t *retval,
         }
     }
 
-    ret = njs_value_property(vm, (njs_value_t *) error, NJS_ATOM_STRING_name,
-                             &value1);
+    error_object = njs_object(error);
+
+    njs_object_property_init(&lhq, &njs_string_name, NJS_NAME_HASH);
+
+    ret = njs_object_property(vm, error_object, &lhq, &value1);
+
     if (njs_slow_path(ret == NJS_ERROR)) {
         return ret;
     }
 
-    if (ret == NJS_DECLINED) {
-        njs_atom_to_value(vm, &value1, NJS_ATOM_STRING_Error);
-    }
-
-    name_value = &value1;
+    name_value = (ret == NJS_OK) ? &value1 : njs_value_arg(&default_name);
 
     if (njs_slow_path(!njs_is_string(name_value))) {
         ret = njs_value_to_string(vm, &value1, name_value);
         if (njs_slow_path(ret != NJS_OK)) {
             return ret;
         }
+
+        name_value = &value1;
     }
 
-    (void) njs_string_prop(vm, &name, name_value);
+    (void) njs_string_prop(&name, name_value);
 
-    ret = njs_value_property(vm,  (njs_value_t *) error, NJS_ATOM_STRING_message,
-                             &value2);
+    lhq.key_hash = NJS_MESSAGE_HASH;
+    lhq.key = njs_str_value("message");
+
+    ret = njs_object_property(vm, error_object, &lhq, &value2);
+
     if (njs_slow_path(ret == NJS_ERROR)) {
         return ret;
     }
 
-    if (ret == NJS_DECLINED) {
-        njs_set_empty_string(vm, &value2);
-    }
-
-    message_value = &value2;
+    message_value = (ret == NJS_OK) ? &value2
+                                    : njs_value_arg(&njs_string_empty);
 
     if (njs_slow_path(!njs_is_string(message_value))) {
         ret = njs_value_to_string(vm, &value2, message_value);
@@ -645,7 +639,7 @@ njs_error_to_string2(njs_vm_t *vm, njs_value_t *retval,
         message_value = &value2;
     }
 
-    (void) njs_string_prop(vm, &message, message_value);
+    (void) njs_string_prop(&message, message_value);
 
     if (name.size == 0) {
         *retval = *message_value;
@@ -683,100 +677,14 @@ njs_error_to_string2(njs_vm_t *vm, njs_value_t *retval,
 
 static njs_int_t
 njs_error_prototype_to_string(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+    njs_index_t unused)
 {
     if (nargs < 1 || !njs_is_object(&args[0])) {
         njs_type_error(vm, "\"this\" argument is not an object");
         return NJS_ERROR;
     }
 
-    return njs_error_to_string2(vm, retval, &args[0], 0);
-}
-
-
-static njs_int_t
-njs_error_prototype_stack(njs_vm_t *vm, njs_object_prop_t *prop, uint32_t unused,
-    njs_value_t *value, njs_value_t *setval, njs_value_t *retval)
-{
-    njs_int_t          ret;
-    njs_str_t          string;
-    njs_arr_t          *stack, *backtrace;
-    njs_uint_t         i;
-    njs_value_t        rv, *stackval;
-    njs_stack_entry_t  *se;
-
-    if (retval != NULL) {
-        if (!njs_is_error(value)) {
-            njs_set_undefined(retval);
-            return NJS_DECLINED;
-        }
-
-        stackval = njs_object_value(value);
-
-        if (setval != NULL) {
-            njs_value_assign(stackval, setval);
-            return NJS_OK;
-        }
-
-        if (!njs_is_data(stackval, NJS_DATA_TAG_ANY)) {
-            njs_value_assign(retval, stackval);
-            return NJS_OK;
-        }
-
-        stack = njs_data(stackval);
-        if (stack == NULL) {
-            njs_set_undefined(retval);
-            return NJS_OK;
-        }
-
-        se = stack->start;
-
-        backtrace = njs_arr_create(vm->mem_pool, stack->items,
-                                   sizeof(njs_backtrace_entry_t));
-        if (njs_slow_path(backtrace == NULL)) {
-            return NJS_ERROR;
-        }
-
-        for (i = 0; i < stack->items; i++) {
-            if (njs_add_backtrace_entry(vm, backtrace, &se[i]) != NJS_OK) {
-                return NJS_ERROR;
-            }
-        }
-
-        ret = njs_error_to_string2(vm, &rv, value, 0);
-        if (njs_slow_path(ret != NJS_OK)) {
-            return ret;
-        }
-
-        njs_string_get(vm, &rv, &string);
-
-        ret = njs_backtrace_to_string(vm, backtrace, &string);
-
-        njs_arr_destroy(backtrace);
-        njs_arr_destroy(stack);
-
-        if (njs_slow_path(ret != NJS_OK)) {
-            return ret;
-        }
-
-        ret = njs_string_create(vm, stackval, string.start, string.length);
-        if (njs_slow_path(ret != NJS_OK)) {
-            return ret;
-        }
-
-        njs_value_assign(retval, stackval);
-
-        return NJS_OK;
-    }
-
-    /* Delete. */
-
-    if (njs_is_error(value)) {
-        stackval = njs_object_value(value);
-        njs_set_data(stackval, NULL, NJS_DATA_TAG_ANY);
-    }
-
-    return NJS_OK;
+    return njs_error_to_string2(vm, &vm->retval, &args[0], 0);
 }
 
 
@@ -792,26 +700,20 @@ njs_error_to_string(njs_vm_t *vm, njs_value_t *retval, const njs_value_t *error)
 }
 
 
-static const njs_object_prop_init_t  njs_error_prototype_properties[] =
+static const njs_object_prop_t  njs_error_prototype_properties[] =
 {
-    NJS_DECLARE_PROP_HANDLER(STRING_constructor,
-                             njs_object_prototype_create_constructor, 0,
-                             NJS_OBJECT_PROP_VALUE_CW),
+    NJS_DECLARE_PROP_HANDLER("constructor",
+                             njs_object_prototype_create_constructor,
+                             0, 0, NJS_OBJECT_PROP_VALUE_CW),
 
-    NJS_DECLARE_PROP_VALUE(STRING_name, njs_ascii_strval("Error"),
+    NJS_DECLARE_PROP_VALUE("name", njs_string("Error"),
                            NJS_OBJECT_PROP_VALUE_CW),
 
-    NJS_DECLARE_PROP_VALUE(STRING_message, njs_ascii_strval(""),
-                           NJS_OBJECT_PROP_VALUE_CW),
+    NJS_DECLARE_PROP_VALUE("message", njs_string(""), NJS_OBJECT_PROP_VALUE_CW),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_valueOf, njs_error_prototype_value_of,
-                            0, 0),
+    NJS_DECLARE_PROP_NATIVE("valueOf", njs_error_prototype_value_of, 0, 0),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_toString, njs_error_prototype_to_string,
-                            0, 0),
-
-    NJS_DECLARE_PROP_HANDLER(STRING_stack, njs_error_prototype_stack,
-                             0, NJS_OBJECT_PROP_VALUE_CW),
+    NJS_DECLARE_PROP_NATIVE("toString", njs_error_prototype_to_string, 0, 0),
 };
 
 
@@ -830,17 +732,16 @@ const njs_object_type_init_t  njs_error_type_init = {
 };
 
 
-static const njs_object_prop_init_t  njs_eval_error_prototype_properties[] =
+static const njs_object_prop_t  njs_eval_error_prototype_properties[] =
 {
-    NJS_DECLARE_PROP_HANDLER(STRING_constructor,
-                             njs_object_prototype_create_constructor, 0,
-                             NJS_OBJECT_PROP_VALUE_CW),
+    NJS_DECLARE_PROP_HANDLER("constructor",
+                             njs_object_prototype_create_constructor,
+                             0, 0, NJS_OBJECT_PROP_VALUE_CW),
 
-    NJS_DECLARE_PROP_VALUE(STRING_name, njs_ascii_strval("EvalError"),
+    NJS_DECLARE_PROP_VALUE("name", njs_string("EvalError"),
                            NJS_OBJECT_PROP_VALUE_CW),
 
-    NJS_DECLARE_PROP_VALUE(STRING_message, njs_ascii_strval(""),
-                           NJS_OBJECT_PROP_VALUE_CW),
+    NJS_DECLARE_PROP_VALUE("message", njs_string(""), NJS_OBJECT_PROP_VALUE_CW),
 };
 
 
@@ -861,30 +762,33 @@ const njs_object_type_init_t  njs_eval_error_type_init = {
 
 static njs_int_t
 njs_internal_error_prototype_to_string(njs_vm_t *vm, njs_value_t *args,
-    njs_uint_t nargs, njs_index_t unused, njs_value_t *retval)
+    njs_uint_t nargs, njs_index_t unused)
 {
     if (nargs >= 1 && njs_is_object(&args[0])) {
+
         /* MemoryError is a nonextensible internal error. */
         if (!njs_object(&args[0])->extensible) {
-            njs_atom_to_value(vm, retval, NJS_ATOM_STRING_MemoryError);
+            static const njs_value_t name = njs_string("MemoryError");
+
+            vm->retval = name;
+
             return NJS_OK;
         }
     }
 
-    return njs_error_prototype_to_string(vm, args, nargs, unused, retval);
+    return njs_error_prototype_to_string(vm, args, nargs, unused);
 }
 
 
-static const njs_object_prop_init_t  njs_internal_error_prototype_properties[] =
+static const njs_object_prop_t  njs_internal_error_prototype_properties[] =
 {
-    NJS_DECLARE_PROP_VALUE(STRING_name, njs_ascii_strval("InternalError"),
+    NJS_DECLARE_PROP_VALUE("name", njs_string("InternalError"),
                            NJS_OBJECT_PROP_VALUE_CW),
 
-    NJS_DECLARE_PROP_VALUE(STRING_message, njs_ascii_strval(""),
-                           NJS_OBJECT_PROP_VALUE_CW),
+    NJS_DECLARE_PROP_VALUE("message", njs_string(""), NJS_OBJECT_PROP_VALUE_CW),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_toString,
-                            njs_internal_error_prototype_to_string, 0, 0),
+    NJS_DECLARE_PROP_NATIVE("toString", njs_internal_error_prototype_to_string,
+                            0, 0),
 };
 
 
@@ -911,17 +815,16 @@ const njs_object_type_init_t  njs_memory_error_type_init = {
 };
 
 
-static const njs_object_prop_init_t  njs_range_error_prototype_properties[] =
+static const njs_object_prop_t  njs_range_error_prototype_properties[] =
 {
-    NJS_DECLARE_PROP_HANDLER(STRING_constructor,
-                             njs_object_prototype_create_constructor, 0,
-                             NJS_OBJECT_PROP_VALUE_CW),
+    NJS_DECLARE_PROP_HANDLER("constructor",
+                             njs_object_prototype_create_constructor,
+                             0, 0, NJS_OBJECT_PROP_VALUE_CW),
 
-    NJS_DECLARE_PROP_VALUE(STRING_name, njs_ascii_strval("RangeError"),
+    NJS_DECLARE_PROP_VALUE("name", njs_string("RangeError"),
                            NJS_OBJECT_PROP_VALUE_CW),
 
-    NJS_DECLARE_PROP_VALUE(STRING_message, njs_ascii_strval(""),
-                           NJS_OBJECT_PROP_VALUE_CW),
+    NJS_DECLARE_PROP_VALUE("message", njs_string(""), NJS_OBJECT_PROP_VALUE_CW),
 };
 
 
@@ -940,17 +843,16 @@ const njs_object_type_init_t  njs_range_error_type_init = {
 };
 
 
-static const njs_object_prop_init_t  njs_reference_error_prototype_properties[] =
+static const njs_object_prop_t  njs_reference_error_prototype_properties[] =
 {
-    NJS_DECLARE_PROP_HANDLER(STRING_constructor,
-                             njs_object_prototype_create_constructor, 0,
-                             NJS_OBJECT_PROP_VALUE_CW),
+    NJS_DECLARE_PROP_HANDLER("constructor",
+                             njs_object_prototype_create_constructor,
+                             0, 0, NJS_OBJECT_PROP_VALUE_CW),
 
-    NJS_DECLARE_PROP_VALUE(STRING_name, njs_ascii_strval("ReferenceError"),
+    NJS_DECLARE_PROP_VALUE("name", njs_string("ReferenceError"),
                            NJS_OBJECT_PROP_VALUE_CW),
 
-    NJS_DECLARE_PROP_VALUE(STRING_message, njs_ascii_strval(""),
-                           NJS_OBJECT_PROP_VALUE_CW),
+    NJS_DECLARE_PROP_VALUE("message", njs_string(""), NJS_OBJECT_PROP_VALUE_CW),
 };
 
 
@@ -969,17 +871,16 @@ const njs_object_type_init_t  njs_reference_error_type_init = {
 };
 
 
-static const njs_object_prop_init_t  njs_syntax_error_prototype_properties[] =
+static const njs_object_prop_t  njs_syntax_error_prototype_properties[] =
 {
-    NJS_DECLARE_PROP_HANDLER(STRING_constructor,
-                             njs_object_prototype_create_constructor, 0,
-                             NJS_OBJECT_PROP_VALUE_CW),
+    NJS_DECLARE_PROP_HANDLER("constructor",
+                             njs_object_prototype_create_constructor,
+                             0, 0, NJS_OBJECT_PROP_VALUE_CW),
 
-    NJS_DECLARE_PROP_VALUE(STRING_name, njs_ascii_strval("SyntaxError"),
+    NJS_DECLARE_PROP_VALUE("name", njs_string("SyntaxError"),
                            NJS_OBJECT_PROP_VALUE_CW),
 
-    NJS_DECLARE_PROP_VALUE(STRING_message, njs_ascii_strval(""),
-                           NJS_OBJECT_PROP_VALUE_CW),
+    NJS_DECLARE_PROP_VALUE("message", njs_string(""), NJS_OBJECT_PROP_VALUE_CW),
 };
 
 
@@ -998,17 +899,16 @@ const njs_object_type_init_t  njs_syntax_error_type_init = {
 };
 
 
-static const njs_object_prop_init_t  njs_type_error_prototype_properties[] =
+static const njs_object_prop_t  njs_type_error_prototype_properties[] =
 {
-    NJS_DECLARE_PROP_HANDLER(STRING_constructor,
-                             njs_object_prototype_create_constructor, 0,
-                             NJS_OBJECT_PROP_VALUE_CW),
+    NJS_DECLARE_PROP_HANDLER("constructor",
+                             njs_object_prototype_create_constructor,
+                             0, 0, NJS_OBJECT_PROP_VALUE_CW),
 
-    NJS_DECLARE_PROP_VALUE(STRING_name, njs_ascii_strval("TypeError"),
+    NJS_DECLARE_PROP_VALUE("name", njs_string("TypeError"),
                            NJS_OBJECT_PROP_VALUE_CW),
 
-    NJS_DECLARE_PROP_VALUE(STRING_message, njs_ascii_strval(""),
-                           NJS_OBJECT_PROP_VALUE_CW),
+    NJS_DECLARE_PROP_VALUE("message", njs_string(""), NJS_OBJECT_PROP_VALUE_CW),
 };
 
 
@@ -1027,17 +927,16 @@ const njs_object_type_init_t  njs_type_error_type_init = {
 };
 
 
-static const njs_object_prop_init_t  njs_uri_error_prototype_properties[] =
+static const njs_object_prop_t  njs_uri_error_prototype_properties[] =
 {
-    NJS_DECLARE_PROP_HANDLER(STRING_constructor,
-                             njs_object_prototype_create_constructor, 0,
-                             NJS_OBJECT_PROP_VALUE_CW),
+    NJS_DECLARE_PROP_HANDLER("constructor",
+                             njs_object_prototype_create_constructor,
+                             0, 0, NJS_OBJECT_PROP_VALUE_CW),
 
-    NJS_DECLARE_PROP_VALUE(STRING_name, njs_ascii_strval("URIError"),
+    NJS_DECLARE_PROP_VALUE("name", njs_string("URIError"),
                            NJS_OBJECT_PROP_VALUE_CW),
 
-    NJS_DECLARE_PROP_VALUE(STRING_message, njs_ascii_strval(""),
-                           NJS_OBJECT_PROP_VALUE_CW),
+    NJS_DECLARE_PROP_VALUE("message", njs_string(""), NJS_OBJECT_PROP_VALUE_CW),
 };
 
 
@@ -1056,17 +955,16 @@ const njs_object_type_init_t  njs_uri_error_type_init = {
 };
 
 
-static const njs_object_prop_init_t  njs_aggregate_error_prototype_properties[] =
+static const njs_object_prop_t  njs_aggregate_error_prototype_properties[] =
 {
-    NJS_DECLARE_PROP_HANDLER(STRING_constructor,
-                             njs_object_prototype_create_constructor, 0,
-                             NJS_OBJECT_PROP_VALUE_CW),
+    NJS_DECLARE_PROP_HANDLER("constructor",
+                             njs_object_prototype_create_constructor,
+                             0, 0, NJS_OBJECT_PROP_VALUE_CW),
 
-    NJS_DECLARE_PROP_VALUE(STRING_name, njs_ascii_strval("AggregateError"),
+    NJS_DECLARE_PROP_VALUE("name", njs_string("AggregateError"),
                            NJS_OBJECT_PROP_VALUE_CW),
 
-    NJS_DECLARE_PROP_VALUE(STRING_message, njs_ascii_strval(""),
-                           NJS_OBJECT_PROP_VALUE_CW),
+    NJS_DECLARE_PROP_VALUE("message", njs_string(""), NJS_OBJECT_PROP_VALUE_CW),
 };
 
 
@@ -1087,14 +985,14 @@ const njs_object_type_init_t  njs_aggregate_error_type_init = {
 
 static njs_int_t
 njs_add_backtrace_entry(njs_vm_t *vm, njs_arr_t *stack,
-    njs_stack_entry_t *se)
+    njs_native_frame_t *native_frame)
 {
     njs_int_t              ret;
     njs_vm_code_t          *code;
     njs_function_t         *function;
     njs_backtrace_entry_t  *be;
 
-    function = se->native ? se->u.function : NULL;
+    function = native_frame->function;
 
     if (function != NULL && function->bound != NULL) {
         /* Skip. */
@@ -1120,7 +1018,7 @@ njs_add_backtrace_entry(njs_vm_t *vm, njs_arr_t *stack,
         return NJS_OK;
     }
 
-    code = njs_lookup_code(vm, se->u.pc);
+    code = njs_lookup_code(vm, native_frame->pc);
 
     if (code != NULL) {
         be->name = code->name;
@@ -1129,7 +1027,7 @@ njs_add_backtrace_entry(njs_vm_t *vm, njs_arr_t *stack,
             be->name = njs_entry_anonymous;
         }
 
-        be->line = njs_lookup_line(code->lines, se->u.pc - code->start);
+        be->line = njs_lookup_line(code->lines, native_frame->pc - code->start);
         if (!vm->options.quiet) {
             be->file = code->file;
         }
@@ -1156,7 +1054,7 @@ njs_backtrace_to_string(njs_vm_t *vm, njs_arr_t *backtrace, njs_str_t *dst)
         return NJS_OK;
     }
 
-    NJS_CHB_MP_INIT(&chain, njs_vm_memory_pool(vm));
+    njs_chb_init(&chain, vm->mem_pool);
 
     njs_chb_append_str(&chain, dst);
     njs_chb_append(&chain, "\n", 1);

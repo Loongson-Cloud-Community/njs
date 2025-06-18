@@ -14,11 +14,6 @@ passed() {
     njs_passed=$((njs_passed+1))
 }
 
-skip() {
-    verbose " SKIPPED\n"
-    njs_passed=$((njs_passed+1))
-}
-
 failed() {
     njs_failed_list="$njs_failed_list $1"
     verbose " FAILED\n"
@@ -38,7 +33,7 @@ njs_failed_list=""
 NJS_TESTS=""
 for arg in $NJS_TEST_PATHS; do
     if [ -d $arg ]; then
-        NJS_TESTS="$NJS_TESTS $(find $arg -name '*\.t\.js' -o -name '*\.t\.mjs')"
+        NJS_TESTS="$NJS_TESTS $(find $arg -name '*\.t\.js')"
     else
         NJS_TESTS="$NJS_TESTS $arg"
     fi

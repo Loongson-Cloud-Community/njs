@@ -10,14 +10,8 @@
 
 
 #define INT24_MAX  0x7FFFFF
-#define INT24_MIN  (-0x800000)
-#define INT40_MAX  0x7FFFFFFFFFLL
-#define INT40_MIN  (-0x8000000000LL)
-#define INT48_MAX  0x7FFFFFFFFFFFLL
-#define INT48_MIN  (-0x800000000000LL)
-#define UINT24_MAX 0xFFFFFFLL
-#define UINT40_MAX 0xFFFFFFFFFFLL
-#define UINT48_MAX 0xFFFFFFFFFFFFLL
+#define INT40_MAX  0x7FFFFFFFFFULL
+#define INT48_MAX  0x7FFFFFFFFFFFULL
 
 #define njs_buffer_magic(size, sign, little)                                 \
     ((size << 2) | (sign << 1) | little)
@@ -64,19 +58,17 @@ static njs_buffer_encoding_t  njs_buffer_encodings[] =
 };
 
 
-static njs_int_t njs_buffer_from_object(njs_vm_t *vm, njs_value_t *value,
-    njs_value_t *retval);
+static njs_int_t njs_buffer_from_object(njs_vm_t *vm, njs_value_t *value);
 static njs_int_t njs_buffer_from_array_buffer(njs_vm_t *vm, njs_value_t *value,
-    njs_value_t *length, njs_value_t *offset, njs_value_t *retval);
-static njs_int_t njs_buffer_from_typed_array(njs_vm_t *vm, njs_value_t *value,
-    njs_value_t *retval);
+    njs_value_t *length, njs_value_t *offset);
+static njs_int_t njs_buffer_from_typed_array(njs_vm_t *vm, njs_value_t *value);
 static njs_int_t njs_buffer_from_string(njs_vm_t *vm, njs_value_t *value,
-    const njs_buffer_encoding_t *encoding, njs_value_t *retval);
+    const njs_buffer_encoding_t *encoding);
 static njs_int_t njs_buffer_write_string(njs_vm_t *vm, njs_value_t *value,
     njs_typed_array_t *array, const njs_buffer_encoding_t *encoding,
-    uint64_t offset, uint64_t length, njs_value_t *retval);
+    uint64_t offset, uint64_t length);
 static njs_int_t njs_buffer_fill(njs_vm_t *vm, njs_typed_array_t *array,
-    const njs_value_t *fill, njs_value_t *encoding, uint64_t offset,
+    const njs_value_t *fill, const njs_value_t *encoding, uint64_t offset,
     uint64_t end);
 static njs_int_t njs_buffer_fill_string(njs_vm_t *vm, const njs_value_t *value,
     njs_typed_array_t *array, const njs_buffer_encoding_t *encoding,
@@ -86,14 +78,14 @@ static njs_int_t njs_buffer_fill_typed_array(njs_vm_t *vm,
     uint8_t *end);
 
 static njs_int_t njs_buffer(njs_vm_t *vm,
-    njs_object_prop_t *prop, uint32_t atom_id, njs_value_t *value,
-    njs_value_t *setval, njs_value_t *retval);
+    njs_object_prop_t *prop, njs_value_t *value, njs_value_t *setval,
+    njs_value_t *retval);
 static njs_int_t njs_buffer_constants(njs_vm_t *vm,
-    njs_object_prop_t *prop, uint32_t atom_id, njs_value_t *value,
-    njs_value_t *setval, njs_value_t *retval);
+    njs_object_prop_t *prop, njs_value_t *value, njs_value_t *setval,
+    njs_value_t *retval);
 static njs_int_t njs_buffer_constant(njs_vm_t *vm,
-    njs_object_prop_t *prop, uint32_t atom_id, njs_value_t *value,
-    njs_value_t *setval, njs_value_t *retval);
+    njs_object_prop_t *prop, njs_value_t *value, njs_value_t *setval,
+    njs_value_t *retval);
 
 static njs_int_t njs_buffer_init(njs_vm_t *vm);
 
@@ -132,7 +124,6 @@ static njs_external_t  njs_ext_buffer[] = {
 
 njs_module_t  njs_buffer_module = {
     .name = njs_str("buffer"),
-    .preinit = NULL,
     .init = njs_buffer_init,
 };
 
@@ -154,7 +145,7 @@ njs_buffer_set(njs_vm_t *vm, njs_value_t *value, const u_char *start,
 
     buffer = (njs_array_buffer_t *) &array[1];
 
-    proto = njs_vm_proto(vm, NJS_OBJ_TYPE_ARRAY_BUFFER);
+    proto = &vm->prototypes[NJS_OBJ_TYPE_ARRAY_BUFFER].object;
 
     njs_lvlhsh_init(&buffer->object.hash);
     njs_lvlhsh_init(&buffer->object.shared_hash);
@@ -168,7 +159,7 @@ njs_buffer_set(njs_vm_t *vm, njs_value_t *value, const u_char *start,
     buffer->u.data = (void *) start;
     buffer->size = size;
 
-    proto = njs_vm_proto(vm, NJS_OBJ_TYPE_BUFFER);
+    proto = &vm->prototypes[NJS_OBJ_TYPE_BUFFER].object;
 
     array->type = NJS_OBJ_TYPE_UINT8_ARRAY;
     njs_lvlhsh_init(&array->object.hash);
@@ -190,7 +181,7 @@ njs_buffer_set(njs_vm_t *vm, njs_value_t *value, const u_char *start,
 }
 
 
-static njs_typed_array_t *
+njs_typed_array_t *
 njs_buffer_alloc(njs_vm_t *vm, size_t size, njs_bool_t zeroing)
 {
     njs_value_t        value;
@@ -204,7 +195,7 @@ njs_buffer_alloc(njs_vm_t *vm, size_t size, njs_bool_t zeroing)
         return NULL;
     }
 
-    array->object.__proto__ = njs_vm_proto(vm, NJS_OBJ_TYPE_BUFFER);
+    array->object.__proto__ = &vm->prototypes[NJS_OBJ_TYPE_BUFFER].object;
 
     return array;
 }
@@ -231,7 +222,7 @@ njs_buffer_new(njs_vm_t *vm, njs_value_t *value, const u_char *start,
 
 static njs_int_t
 njs_buffer_constructor(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+    njs_index_t unused)
 {
     njs_type_error(vm, "Buffer is not a constructor");
 
@@ -241,7 +232,7 @@ njs_buffer_constructor(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
 
 static njs_int_t
 njs_buffer_alloc_safe(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t safe, njs_value_t *retval)
+    njs_index_t safe)
 {
     double             size;
     njs_int_t          ret;
@@ -274,7 +265,7 @@ njs_buffer_alloc_safe(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
         }
     }
 
-    njs_set_typed_array(retval, array);
+    njs_set_typed_array(&vm->retval, array);
 
     return NJS_OK;
 }
@@ -282,10 +273,10 @@ njs_buffer_alloc_safe(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
 
 static njs_int_t
 njs_buffer_from(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+    njs_index_t unused)
 {
     njs_int_t                    ret;
-    njs_value_t                  *value;
+    njs_value_t                  *value, retval;
     const njs_buffer_encoding_t  *encoding;
 
     value = njs_arg(args, nargs, 1);
@@ -294,36 +285,36 @@ next:
 
     switch (value->type) {
     case NJS_TYPED_ARRAY:
-        return njs_buffer_from_typed_array(vm, value, retval);
+        return njs_buffer_from_typed_array(vm, value);
 
     case NJS_ARRAY_BUFFER:
         return njs_buffer_from_array_buffer(vm, value, njs_arg(args, nargs, 2),
-                                            njs_arg(args, nargs, 3), retval);
+                                            njs_arg(args, nargs, 3));
 
     case NJS_STRING:
-        encoding = njs_buffer_encoding(vm, njs_arg(args, nargs, 2), 1);
+        encoding = njs_buffer_encoding(vm, njs_arg(args, nargs, 2));
         if (njs_slow_path(encoding == NULL)) {
             return NJS_ERROR;
         }
 
-        return njs_buffer_from_string(vm, value, encoding, retval);
+        return njs_buffer_from_string(vm, value, encoding);
 
     default:
         if (njs_is_object(value)) {
-            ret = njs_value_of(vm, value, retval);
+            ret = njs_value_of(vm, value, &retval);
             if (njs_slow_path(ret == NJS_ERROR)) {
                 return ret;
             }
 
-            if (ret == NJS_OK && !njs_is_null(retval)
-                && !(njs_is_object(retval)
-                     && njs_object(retval) == njs_object(value)))
+            if (ret == NJS_OK && !njs_is_null(&retval)
+                && !(njs_is_object(&retval)
+                     && njs_object(&retval) == njs_object(value)))
             {
-                njs_value_assign(value, retval);
+                njs_value_assign(value, &retval);
                 goto next;
             }
 
-            ret = njs_buffer_from_object(vm, value, retval);
+            ret = njs_buffer_from_object(vm, value);
             if (njs_slow_path(ret != NJS_DECLINED)) {
                 return ret;
             }
@@ -338,7 +329,7 @@ next:
 
 
 static njs_int_t
-njs_buffer_from_object(njs_vm_t *vm, njs_value_t *value, njs_value_t *retval)
+njs_buffer_from_object(njs_vm_t *vm, njs_value_t *value)
 {
     double             num;
     int64_t            len;
@@ -346,42 +337,46 @@ njs_buffer_from_object(njs_vm_t *vm, njs_value_t *value, njs_value_t *retval)
     uint32_t           i;
     njs_str_t          str;
     njs_int_t          ret;
-    njs_value_t        val, data, length;
+    njs_value_t        data, retval, length;
     njs_typed_array_t  *buffer;
 
+    static const njs_value_t  string_length = njs_string("length");
     static const njs_str_t  str_buffer = njs_str("Buffer");
 
 next:
 
-    ret = njs_value_property(vm, value, NJS_ATOM_STRING_length, &length);
+    ret = njs_value_property(vm, value, njs_value_arg(&string_length),
+                             &length);
     if (njs_slow_path(ret == NJS_ERROR)) {
         return ret;
     }
 
     if (ret == NJS_DECLINED) {
-        ret = njs_value_property(vm, value, NJS_ATOM_STRING_type, &val);
+        ret = njs_value_property(vm, value, njs_value_arg(&njs_string_type),
+                                 &retval);
         if (njs_slow_path(ret != NJS_OK)) {
             return ret;
         }
 
-        ret = njs_value_to_string(vm, &val, &val);
+        ret = njs_value_to_string(vm, &retval, &retval);
         if (njs_slow_path(ret != NJS_OK)) {
             return ret;
         }
 
-        njs_string_get(vm, &val, &str);
+        njs_string_get(&retval, &str);
 
         if (!njs_strstr_eq(&str, &str_buffer)) {
             return NJS_DECLINED;
         }
 
-        ret = njs_value_property(vm, value, NJS_ATOM_STRING_data, &val);
+        ret = njs_value_property(vm, value, njs_value_arg(&njs_string_data),
+                                 &retval);
         if (njs_slow_path(ret != NJS_OK)) {
             return ret;
         }
 
-        if (njs_is_object(&val)) {
-            njs_value_assign(&data, &val);
+        if (njs_is_object(&retval)) {
+            njs_value_assign(&data, &retval);
             value = &data;
             goto next;
         }
@@ -402,12 +397,12 @@ next:
     p = njs_typed_array_buffer(buffer)->u.u8;
 
     for (i = 0; i < len; i++) {
-        ret = njs_value_property_i64(vm, value, i, &val);
+        ret = njs_value_property_i64(vm, value, i, &retval);
         if (njs_slow_path(ret == NJS_ERROR)) {
             return ret;
         }
 
-        ret = njs_value_to_number(vm, &val, &num);
+        ret = njs_value_to_number(vm, &retval, &num);
         if (njs_slow_path(ret != NJS_OK)) {
             return ret;
         }
@@ -415,7 +410,7 @@ next:
         *p++ = njs_number_to_int32(num);
     }
 
-    njs_set_typed_array(retval, buffer);
+    njs_set_typed_array(&vm->retval, buffer);
 
     return NJS_OK;
 }
@@ -423,7 +418,7 @@ next:
 
 static njs_int_t
 njs_buffer_from_array_buffer(njs_vm_t *vm, njs_value_t *value,
-    njs_value_t *offset, njs_value_t *length, njs_value_t *retval)
+    njs_value_t *offset, njs_value_t *length)
 {
     int64_t             off, len;
     njs_int_t           ret;
@@ -465,20 +460,19 @@ njs_buffer_from_array_buffer(njs_vm_t *vm, njs_value_t *value,
         return NJS_ERROR;
     }
 
-    buffer->object.__proto__ = njs_vm_proto(vm, NJS_OBJ_TYPE_BUFFER);
+    buffer->object.__proto__ = &vm->prototypes[NJS_OBJ_TYPE_BUFFER].object;
 
     buffer->offset = off;
     buffer->byte_length = len;
 
-    njs_set_typed_array(retval, buffer);
+    njs_set_typed_array(&vm->retval, buffer);
 
     return NJS_OK;
 }
 
 
 static njs_int_t
-njs_buffer_from_typed_array(njs_vm_t *vm, njs_value_t *value,
-    njs_value_t *retval)
+njs_buffer_from_typed_array(njs_vm_t *vm, njs_value_t *value)
 {
     uint8_t            *p;
     uint32_t           i, length;
@@ -503,7 +497,7 @@ njs_buffer_from_typed_array(njs_vm_t *vm, njs_value_t *value,
         *p++ = njs_number_to_int32(njs_typed_array_prop(array, i));
     }
 
-    njs_set_typed_array(retval, buffer);
+    njs_set_typed_array(&vm->retval, buffer);
 
     return NJS_OK;
 }
@@ -511,7 +505,7 @@ njs_buffer_from_typed_array(njs_vm_t *vm, njs_value_t *value,
 
 static njs_int_t
 njs_buffer_from_string(njs_vm_t *vm, njs_value_t *value,
-    const njs_buffer_encoding_t *encoding, njs_value_t *retval)
+    const njs_buffer_encoding_t *encoding)
 {
     njs_int_t          ret;
     njs_str_t          str;
@@ -523,7 +517,7 @@ njs_buffer_from_string(njs_vm_t *vm, njs_value_t *value,
         return NJS_ERROR;
     }
 
-    njs_string_get(vm, &dst, &str);
+    njs_string_get(&dst, &str);
 
     buffer = njs_buffer_alloc(vm, str.length, 0);
     if (njs_slow_path(buffer == NULL)) {
@@ -532,21 +526,21 @@ njs_buffer_from_string(njs_vm_t *vm, njs_value_t *value,
 
     memcpy(njs_typed_array_buffer(buffer)->u.u8, str.start, str.length);
 
-    njs_set_typed_array(retval, buffer);
+    njs_set_typed_array(&vm->retval, buffer);
 
     return NJS_OK;
 }
 
 
 static size_t
-njs_buffer_decode_string_length(njs_vm_t *vm, njs_value_t *value,
+njs_buffer_decode_string_length(njs_value_t *value,
     const njs_buffer_encoding_t *encoding)
 {
     size_t             size;
     njs_str_t          str;
     njs_string_prop_t  string;
 
-    (void) njs_string_prop(vm, &string, value);
+    (void) njs_string_prop(&string, value);
 
     str.start = string.start;
     str.length = string.size;
@@ -564,7 +558,7 @@ njs_buffer_decode_string_length(njs_vm_t *vm, njs_value_t *value,
 
 static njs_int_t
 njs_buffer_byte_length(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+    njs_index_t unused)
 {
     size_t                       size;
     njs_value_t                  *value;
@@ -574,26 +568,26 @@ njs_buffer_byte_length(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
 
     switch (value->type) {
     case NJS_TYPED_ARRAY:
-        njs_set_number(retval, njs_typed_array(value)->byte_length);
+        njs_set_number(&vm->retval, njs_typed_array(value)->byte_length);
         return NJS_OK;
 
     case NJS_ARRAY_BUFFER:
-        njs_set_number(retval, njs_array_buffer(value)->size);
+        njs_set_number(&vm->retval, njs_array_buffer(value)->size);
         return NJS_OK;
 
     case NJS_DATA_VIEW:
-        njs_set_number(retval, njs_data_view(value)->byte_length);
+        njs_set_number(&vm->retval, njs_data_view(value)->byte_length);
         return NJS_OK;
 
     case NJS_STRING:
-        encoding = njs_buffer_encoding(vm, njs_arg(args, nargs, 2), 1);
+        encoding = njs_buffer_encoding(vm, njs_arg(args, nargs, 2));
         if (njs_slow_path(encoding == NULL)) {
             return NJS_ERROR;
         }
 
-        size = njs_buffer_decode_string_length(vm, value, encoding);
+        size = njs_buffer_decode_string_length(value, encoding);
 
-        njs_set_number(retval, size);
+        njs_set_number(&vm->retval, size);
 
         return NJS_OK;
 
@@ -624,7 +618,7 @@ njs_buffer_slot_internal(njs_vm_t *vm, njs_value_t *value)
 }
 
 
-static njs_typed_array_t *
+njs_typed_array_t *
 njs_buffer_slot(njs_vm_t *vm, njs_value_t *value, const char *name)
 {
     njs_typed_array_t  *array;
@@ -637,36 +631,6 @@ njs_buffer_slot(njs_vm_t *vm, njs_value_t *value, const char *name)
     }
 
     return array;
-}
-
-
-njs_int_t
-njs_value_buffer_get(njs_vm_t *vm, njs_value_t *value, njs_str_t *dst)
-{
-    njs_typed_array_t   *array;
-    njs_array_buffer_t  *array_buffer;
-
-    if (njs_slow_path(!(njs_is_typed_array(value)
-                        || njs_is_data_view(value))))
-    {
-        njs_type_error(vm, "first argument must be a Buffer or DataView");
-        return NJS_ERROR;
-    }
-
-    array = njs_typed_array(value);
-    if (njs_slow_path(array == NULL)) {
-        return NJS_ERROR;
-    }
-
-    array_buffer = njs_typed_array_writable(vm, array);
-    if (njs_slow_path(array_buffer == NULL)) {
-        return NJS_ERROR;
-    }
-
-    dst->length = array->byte_length;
-    dst->start = &array_buffer->u.u8[array->offset];
-
-    return NJS_OK;
 }
 
 
@@ -727,8 +691,7 @@ njs_buffer_array_range(njs_vm_t *vm, njs_typed_array_t *array,
 static njs_int_t
 njs_buffer_compare_array(njs_vm_t *vm, njs_value_t *val1, njs_value_t *val2,
     const njs_value_t *target_start, const njs_value_t *target_end,
-    const njs_value_t *source_start, const njs_value_t *source_end,
-    njs_value_t *retval)
+    const njs_value_t *source_start, const njs_value_t *source_end)
 {
     size_t             size, src_size, trg_size;
     uint8_t            *src, *src_end, *trg, *trg_end;
@@ -765,7 +728,7 @@ njs_buffer_compare_array(njs_vm_t *vm, njs_value_t *val1, njs_value_t *val2,
     ret = memcmp(trg, src, size);
 
     if (ret != 0) {
-        njs_set_number(retval, (ret < 0) ? 1 : -1);
+        njs_set_number(&vm->retval, (ret < 0) ? 1 : -1);
         return NJS_OK;
     }
 
@@ -776,7 +739,7 @@ njs_buffer_compare_array(njs_vm_t *vm, njs_value_t *val1, njs_value_t *val2,
         ret = 1;
     }
 
-    njs_set_number(retval, ret);
+    njs_set_number(&vm->retval, ret);
 
     return NJS_OK;
 }
@@ -784,25 +747,24 @@ njs_buffer_compare_array(njs_vm_t *vm, njs_value_t *val1, njs_value_t *val2,
 
 static njs_int_t
 njs_buffer_compare(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+    njs_index_t unused)
 {
     return njs_buffer_compare_array(vm, njs_arg(args, nargs, 1),
                                     njs_arg(args, nargs, 2),
                                     &njs_value_undefined, &njs_value_undefined,
-                                    &njs_value_undefined, &njs_value_undefined,
-                                    retval);
+                                    &njs_value_undefined, &njs_value_undefined);
 }
 
 
 static njs_int_t
 njs_buffer_concat(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+    njs_index_t unused)
 {
     u_char             *p, *src;
     size_t             n;
     int64_t            i, len, list_len;
     njs_int_t          ret;
-    njs_value_t        *list, *value, *length, val;
+    njs_value_t        *list, *value, *length, retval;
     njs_array_t        *array;
     njs_typed_array_t  *buffer, *arr;
 
@@ -847,18 +809,18 @@ njs_buffer_concat(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
     } else {
 
         for (i = 0; i < list_len; i++) {
-            ret = njs_value_property_i64(vm, list, i, &val);
+            ret = njs_value_property_i64(vm, list, i, &retval);
             if (njs_slow_path(ret == NJS_ERROR)) {
                 return ret;
             }
 
-            if (njs_slow_path(!njs_is_typed_array(&val))) {
+            if (njs_slow_path(!njs_is_typed_array(&retval))) {
                 njs_type_error(vm, "\"list[%L]\" argument must be an "
                                    "instance of Buffer or Uint8Array", i);
                 return NJS_ERROR;
             }
 
-            arr = njs_typed_array(&val);
+            arr = njs_typed_array(&retval);
             if (njs_slow_path(njs_is_detached_buffer(arr->buffer))) {
                 njs_type_error(vm, "detached buffer");
                 return NJS_ERROR;
@@ -909,12 +871,12 @@ njs_buffer_concat(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
 
     } else {
         for (i = 0; len != 0 && i < list_len; i++) {
-            ret = njs_value_property_i64(vm, list, i, &val);
+            ret = njs_value_property_i64(vm, list, i, &retval);
             if (njs_slow_path(ret == NJS_ERROR)) {
                 return ret;
             }
 
-            arr = njs_typed_array(&val);
+            arr = njs_typed_array(&retval);
             n = njs_min((size_t) len, arr->byte_length);
             src = &njs_typed_array_buffer(arr)->u.u8[arr->offset];
 
@@ -928,7 +890,7 @@ njs_buffer_concat(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
         njs_memzero(p, len);
     }
 
-    njs_set_typed_array(retval, buffer);
+    njs_set_typed_array(&vm->retval, buffer);
 
     return NJS_OK;
 }
@@ -936,22 +898,22 @@ njs_buffer_concat(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
 
 static njs_int_t
 njs_buffer_is_buffer(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+    njs_index_t unused)
 {
     njs_bool_t         is;
     njs_typed_array_t  *array;
 
     is = 0;
 
-    array = njs_buffer_slot_internal(vm, njs_arg(args, nargs, 1));
+    array = njs_buffer_slot(vm, njs_arg(args, nargs, 1), "source");
 
     if (njs_fast_path(array != NULL && array->object.__proto__
-                      == njs_vm_proto(vm, NJS_OBJ_TYPE_BUFFER)))
+                      == &vm->prototypes[NJS_OBJ_TYPE_BUFFER].object))
     {
         is = 1;
     }
 
-    njs_set_boolean(retval, is);
+    njs_set_boolean(&vm->retval, is);
 
     return NJS_OK;
 }
@@ -959,13 +921,13 @@ njs_buffer_is_buffer(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
 
 static njs_int_t
 njs_buffer_is_encoding(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+    njs_index_t unused)
 {
-    njs_value_t  *value;
+    const njs_value_t  *value;
 
     value = njs_arg(args, nargs, 1);
-    njs_set_boolean(retval, njs_is_defined(value)
-                                 && njs_buffer_encoding(vm, value, 0) != NULL);
+    njs_set_boolean(&vm->retval, njs_is_defined(value)
+                                 && njs_buffer_encoding(vm, value) != NULL);
 
     return NJS_OK;
 }
@@ -973,8 +935,7 @@ njs_buffer_is_encoding(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
 
 static njs_int_t
 njs_buffer_prototype_length(njs_vm_t *vm, njs_object_prop_t *prop,
-    uint32_t unused, njs_value_t *value, njs_value_t *setval,
-    njs_value_t *retval)
+    njs_value_t *value, njs_value_t *setval, njs_value_t *retval)
 {
     njs_typed_array_t  *array;
 
@@ -992,7 +953,7 @@ njs_buffer_prototype_length(njs_vm_t *vm, njs_object_prop_t *prop,
 
 static njs_int_t
 njs_buffer_prototype_read_int(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t magic, njs_value_t *retval)
+    njs_index_t magic)
 {
     double              v;
     uint32_t            u32;
@@ -1182,7 +1143,7 @@ njs_buffer_prototype_read_int(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
         break;
     }
 
-    njs_set_number(retval, v);
+    njs_set_number(&vm->retval, v);
 
     return NJS_OK;
 }
@@ -1190,7 +1151,7 @@ njs_buffer_prototype_read_int(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
 
 static njs_int_t
 njs_buffer_prototype_read_float(njs_vm_t *vm, njs_value_t *args,
-    njs_uint_t nargs, njs_index_t magic, njs_value_t *retval)
+    njs_uint_t nargs, njs_index_t magic)
 {
     double              v;
     uint32_t            u32;
@@ -1261,7 +1222,7 @@ njs_buffer_prototype_read_float(njs_vm_t *vm, njs_value_t *args,
         v = conv_f64.f;
     }
 
-    njs_set_number(retval, v);
+    njs_set_number(&vm->retval, v);
 
     return NJS_OK;
 }
@@ -1269,14 +1230,14 @@ njs_buffer_prototype_read_float(njs_vm_t *vm, njs_value_t *args,
 
 static njs_int_t
 njs_buffer_prototype_write_int(njs_vm_t *vm, njs_value_t *args,
-    njs_uint_t nargs, njs_index_t magic, njs_value_t *retval)
+    njs_uint_t nargs, njs_index_t magic)
 {
     uint8_t             *u8;
     int64_t             i64;
     uint32_t            u32;
     uint64_t            index, size;
     njs_int_t           ret;
-    njs_bool_t          little, swap, sign;
+    njs_bool_t          little, swap;
     njs_value_t         *this, *value;
     njs_typed_array_t   *array;
     njs_array_buffer_t  *buffer;
@@ -1324,7 +1285,6 @@ njs_buffer_prototype_write_int(njs_vm_t *vm, njs_value_t *args,
     }
 
     little = magic & 1;
-    sign = (magic >> 1) & 1;
     swap = little;
 
 #if NJS_HAVE_LITTLE_ENDIAN
@@ -1340,41 +1300,11 @@ njs_buffer_prototype_write_int(njs_vm_t *vm, njs_value_t *args,
 
     switch (size) {
     case 1:
-        if (sign) {
-            if (i64 < INT8_MIN || i64 > INT8_MAX) {
-                njs_range_error(vm, "value is outside the range of "
-                                "a representable int8");
-                return NJS_ERROR;
-            }
-
-        } else {
-            if (i64 < 0 || i64 > UINT8_MAX) {
-                njs_range_error(vm, "value is outside the range of "
-                                "a representable uint8");
-                return NJS_ERROR;
-            }
-        }
-
         *u8 = i64;
         break;
 
     case 2:
         u32 = (uint16_t) i64;
-
-        if (sign) {
-            if (i64 < INT16_MIN || i64 > INT16_MAX) {
-                njs_range_error(vm, "value is outside the range of "
-                                "a representable int16");
-                return NJS_ERROR;
-            }
-
-        } else {
-            if (i64 < 0 || i64 > UINT16_MAX) {
-                njs_range_error(vm, "value is outside the range of "
-                                "a representable uint16");
-                return NJS_ERROR;
-            }
-        }
 
         if (swap) {
             u32 = njs_bswap_u16(u32);
@@ -1384,21 +1314,6 @@ njs_buffer_prototype_write_int(njs_vm_t *vm, njs_value_t *args,
         break;
 
     case 3:
-        if (sign) {
-            if (i64 < INT24_MIN || i64 > INT24_MAX) {
-                njs_range_error(vm, "value is outside the range of "
-                                "a representable int24");
-                return NJS_ERROR;
-            }
-
-        } else {
-            if (i64 < 0 || i64 > UINT24_MAX) {
-                njs_range_error(vm, "value is outside the range of "
-                                "a representable uint24");
-                return NJS_ERROR;
-            }
-        }
-
         if (little) {
             *u8++ = i64; i64 >>= 8;
             *u8++ = i64; i64 >>= 8;
@@ -1415,21 +1330,6 @@ njs_buffer_prototype_write_int(njs_vm_t *vm, njs_value_t *args,
         break;
 
     case 4:
-        if (sign) {
-            if (i64 < INT32_MIN || i64 > INT32_MAX) {
-                njs_range_error(vm, "value is outside the range of "
-                                "a representable int32");
-                return NJS_ERROR;
-            }
-
-        } else {
-            if (i64 < 0 || i64 > UINT32_MAX) {
-                njs_range_error(vm, "value is outside the range of "
-                                "a representable uint32");
-                return NJS_ERROR;
-            }
-        }
-
         u32 = i64;
 
         if (swap) {
@@ -1440,21 +1340,6 @@ njs_buffer_prototype_write_int(njs_vm_t *vm, njs_value_t *args,
         break;
 
     case 5:
-        if (sign) {
-            if (i64 < INT40_MIN || i64 > INT40_MAX) {
-                njs_range_error(vm, "value is outside the range of "
-                                "a representable int40");
-                return NJS_ERROR;
-            }
-
-        } else {
-            if (i64 < 0 || i64 > UINT40_MAX) {
-                njs_range_error(vm, "value is outside the range of "
-                                "a representable uint40");
-                return NJS_ERROR;
-            }
-        }
-
         if (little) {
             *u8++ = i64; i64 >>= 8;
             *u8++ = i64; i64 >>= 8;
@@ -1476,21 +1361,6 @@ njs_buffer_prototype_write_int(njs_vm_t *vm, njs_value_t *args,
 
     case 6:
     default:
-        if (sign) {
-            if (i64 < INT48_MIN || i64 > INT48_MAX) {
-                njs_range_error(vm, "value is outside the range of "
-                                "a representable int48");
-                return NJS_ERROR;
-            }
-
-        } else {
-            if (i64 < 0 || i64 > UINT48_MAX) {
-                njs_range_error(vm, "value is outside the range of "
-                                "a representable uint48");
-                return NJS_ERROR;
-            }
-        }
-
         if (little) {
             *u8++ = i64; i64 >>= 8;
             *u8++ = i64; i64 >>= 8;
@@ -1513,7 +1383,7 @@ njs_buffer_prototype_write_int(njs_vm_t *vm, njs_value_t *args,
         break;
     }
 
-    njs_set_number(retval, index + size);
+    njs_set_number(&vm->retval, index + size);
 
     return NJS_OK;
 }
@@ -1521,7 +1391,7 @@ njs_buffer_prototype_write_int(njs_vm_t *vm, njs_value_t *args,
 
 static njs_int_t
 njs_buffer_prototype_write_float(njs_vm_t *vm, njs_value_t *args,
-    njs_uint_t nargs, njs_index_t magic, njs_value_t *retval)
+    njs_uint_t nargs, njs_index_t magic)
 {
     double              v;
     uint8_t             *u8;
@@ -1598,7 +1468,7 @@ njs_buffer_prototype_write_float(njs_vm_t *vm, njs_value_t *args,
         *((uint64_t *) u8) = conv_f64.u;
     }
 
-    njs_set_number(retval, index + size);
+    njs_set_undefined(&vm->retval);
 
     return NJS_OK;
 }
@@ -1606,7 +1476,7 @@ njs_buffer_prototype_write_float(njs_vm_t *vm, njs_value_t *args,
 
 static njs_int_t
 njs_buffer_prototype_write(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+    njs_index_t unused)
 {
     uint64_t                     offset, length;
     njs_int_t                    ret;
@@ -1661,7 +1531,7 @@ njs_buffer_prototype_write(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
 
 encoding:
 
-    encoding = njs_buffer_encoding(vm, enc, 1);
+    encoding = njs_buffer_encoding(vm, enc);
     if (njs_slow_path(encoding == NULL)) {
         return NJS_ERROR;
     }
@@ -1671,26 +1541,24 @@ encoding:
         return NJS_ERROR;
     }
 
-    if (offset > array->byte_length) {
+    if (offset >= array->byte_length) {
         njs_range_error(vm, "\"offset\" is out of range");
         return NJS_ERROR;
     }
 
-    return njs_buffer_write_string(vm, value, array, encoding, offset, length,
-                                   retval);
+    return njs_buffer_write_string(vm, value, array, encoding, offset, length);
 }
 
 
 static njs_int_t
 njs_buffer_write_string(njs_vm_t *vm, njs_value_t *value,
     njs_typed_array_t *array, const njs_buffer_encoding_t *encoding,
-    uint64_t offset, uint64_t length, njs_value_t *retval)
+    uint64_t offset, uint64_t length)
 {
     uint8_t             *start;
     njs_int_t           ret;
     njs_str_t           str;
     njs_value_t         dst;
-    const u_char        *p, *end, *prev;
     njs_array_buffer_t  *buffer;
 
     buffer = njs_typed_array_buffer(array);
@@ -1700,7 +1568,7 @@ njs_buffer_write_string(njs_vm_t *vm, njs_value_t *value,
         return NJS_ERROR;
     }
 
-    njs_string_get(vm, &dst, &str);
+    njs_string_get(&dst, &str);
 
     start = &buffer->u.u8[array->offset + offset];
 
@@ -1713,28 +1581,11 @@ njs_buffer_write_string(njs_vm_t *vm, njs_value_t *value,
         goto done;
     }
 
-    length = njs_min(str.length, (size_t) length);
-
-    if (encoding->decode == njs_string_decode_utf8) {
-        /* Avoid writing incomplete UTF-8 characters. */
-        p = prev = str.start;
-        end = p + length;
-
-        while (p < end) {
-            p = njs_utf8_next(p, str.start + str.length);
-            if (p <= end) {
-                prev = p;
-            }
-        }
-
-        length = prev - str.start;
-    }
-
     memcpy(start, str.start, length);
 
 done:
 
-    njs_set_number(retval, length);
+    njs_set_number(&vm->retval, length);
 
     return NJS_OK;
 }
@@ -1742,7 +1593,7 @@ done:
 
 static njs_int_t
 njs_buffer_prototype_fill(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+    njs_index_t unused)
 {
     uint64_t           offset, end;
     njs_int_t          ret;
@@ -1801,7 +1652,7 @@ fill:
 
 done:
 
-    njs_value_assign(retval, this);
+    njs_vm_retval_set(vm, this);
 
     return NJS_OK;
 }
@@ -1809,7 +1660,7 @@ done:
 
 static njs_int_t
 njs_buffer_fill(njs_vm_t *vm, njs_typed_array_t *array, const njs_value_t *fill,
-    njs_value_t *encode, uint64_t offset, uint64_t end)
+    const njs_value_t *encode, uint64_t offset, uint64_t end)
 {
     double                       num;
     uint8_t                      *start, *stop;
@@ -1841,7 +1692,7 @@ njs_buffer_fill(njs_vm_t *vm, njs_typed_array_t *array, const njs_value_t *fill,
 
     switch (fill->type) {
     case NJS_STRING:
-        encoding = njs_buffer_encoding(vm, encode, 1);
+        encoding = njs_buffer_encoding(vm, encode);
         if (njs_slow_path(encoding == NULL)) {
             return NJS_ERROR;
         }
@@ -1884,7 +1735,7 @@ njs_buffer_fill_string(njs_vm_t *vm, const njs_value_t *value,
         return NJS_ERROR;
     }
 
-    njs_string_get(vm, &dst, &str);
+    njs_string_get(&dst, &str);
 
     if (str.length == 0) {
         memset(start, 0, end - start);
@@ -1936,7 +1787,7 @@ njs_buffer_fill_typed_array(njs_vm_t *vm, const njs_value_t *value,
 
 static njs_int_t
 njs_buffer_prototype_to_string(njs_vm_t *vm, njs_value_t *args,
-    njs_uint_t nargs, njs_index_t unused, njs_value_t *retval)
+    njs_uint_t nargs, njs_index_t unused)
 {
     uint64_t                     start, end;
     njs_int_t                    ret;
@@ -1957,7 +1808,7 @@ njs_buffer_prototype_to_string(njs_vm_t *vm, njs_value_t *args,
     start = 0;
     end = array->byte_length;
 
-    encoding = njs_buffer_encoding(vm,  njs_arg(args, nargs, 1), 1);
+    encoding = njs_buffer_encoding(vm,  njs_arg(args, nargs, 1));
     if (njs_slow_path(encoding == NULL)) {
         return NJS_ERROR;
     }
@@ -1989,28 +1840,28 @@ njs_buffer_prototype_to_string(njs_vm_t *vm, njs_value_t *args,
     str.length = end - start;
 
     if (njs_slow_path(str.length == 0)) {
-        njs_set_empty_string(vm, retval);
+        njs_vm_retval_set(vm, &njs_string_empty);
         return NJS_OK;
     }
 
-    return encoding->encode(vm, retval, &str);
+    return encoding->encode(vm, &vm->retval, &str);
 }
 
 
 static njs_int_t
 njs_buffer_prototype_compare(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+    njs_index_t unused)
 {
     return njs_buffer_compare_array(vm, njs_argument(args, 0),
                                njs_arg(args, nargs, 1), njs_arg(args, nargs, 2),
                                njs_arg(args, nargs, 3), njs_arg(args, nargs, 4),
-                               njs_arg(args, nargs, 5), retval);
+                               njs_arg(args, nargs, 5));
 }
 
 
 static njs_int_t
 njs_buffer_prototype_copy(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+    njs_index_t unused)
 {
     size_t              size;
     uint8_t             *src, *src_end, *trg, *trg_end;
@@ -2062,7 +1913,7 @@ njs_buffer_prototype_copy(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
         memmove(trg, src, size);
     }
 
-    njs_set_number(retval, size);
+    njs_set_number(&vm->retval, size);
 
     return NJS_OK;
 }
@@ -2070,19 +1921,19 @@ njs_buffer_prototype_copy(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
 
 static njs_int_t
 njs_buffer_prototype_equals(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+    njs_index_t unused)
 {
     njs_int_t  ret;
 
     ret = njs_buffer_compare_array(vm, njs_argument(args, 0),
                                   njs_arg(args, nargs, 1), &njs_value_undefined,
                                   &njs_value_undefined, &njs_value_undefined,
-                                  &njs_value_undefined, retval);
+                                  &njs_value_undefined);
     if (njs_slow_path(ret != NJS_OK)) {
         return ret;
     }
 
-    njs_set_boolean(retval, njs_number(retval) == 0);
+    njs_set_boolean(&vm->retval, njs_number(&vm->retval) == 0);
 
     return NJS_OK;
 }
@@ -2090,10 +1941,10 @@ njs_buffer_prototype_equals(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
 
 static njs_int_t
 njs_buffer_prototype_index_of(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t last, njs_value_t *retval)
+    njs_index_t last)
 {
     uint8_t                      byte;
-    int64_t                      from, to, increment, length, index, i;
+    int64_t                      from, to, increment, length, offset, index, i;
     njs_int_t                    ret;
     njs_str_t                    str;
     njs_value_t                  *this, *value, *value_from, *enc, dst;
@@ -2113,6 +1964,10 @@ njs_buffer_prototype_index_of(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
     }
 
     index = -1;
+
+    if (njs_slow_path(array->byte_length == 0)) {
+        goto done;
+    }
 
     length = array->byte_length;
 
@@ -2138,17 +1993,36 @@ njs_buffer_prototype_index_of(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
             return ret;
         }
 
-        if (from >= 0) {
-            from = njs_min(from, length);
+        if (last) {
+            if (from >= 0) {
+                from = njs_min(from, length - 1);
+
+            } else if (from < 0) {
+                from += length;
+            }
+
+            if (from <= to) {
+                goto done;
+            }
 
         } else {
-            from = njs_max(0, length + from);
+            if (from < 0) {
+                from += length;
+
+                if (from < 0) {
+                    from = 0;
+                }
+            }
+
+            if (from >= to) {
+                goto done;
+            }
         }
     }
 
 encoding:
 
-    encoding = njs_buffer_encoding(vm, enc, 1);
+    encoding = njs_buffer_encoding(vm, enc);
     if (njs_slow_path(encoding == NULL)) {
         return NJS_ERROR;
     }
@@ -2159,7 +2033,8 @@ encoding:
         return NJS_ERROR;
     }
 
-    u8 = &buffer->u.u8[array->offset];
+    u8 = &buffer->u.u8[0];
+    offset = array->offset;
 
     switch (value->type) {
     case NJS_STRING:
@@ -2170,7 +2045,7 @@ encoding:
                 return ret;
             }
 
-            njs_string_get(vm, &dst, &str);
+            njs_string_get(&dst, &str);
 
         } else {
             src = njs_typed_array(value);
@@ -2187,28 +2062,28 @@ encoding:
             str.length = src->byte_length;
         }
 
-        if (last) {
-            from = njs_min(from, length - (int64_t) str.length);
-
-            if (to > from) {
-                goto done;
-            }
-
-        } else {
-            to -= (int64_t) str.length - 1;
-
-            if (from > to) {
-                goto done;
-            }
-        }
-
-        if (from == to && str.length == 0) {
-            index = 0;
+        if (njs_slow_path(str.length == 0)) {
+            index = (last) ? length : 0;
             goto done;
         }
 
+        if (last) {
+            if (from - to < (int64_t) str.length) {
+                goto done;
+            }
+
+            from -= str.length - 1;
+
+        } else {
+            if (to - from < (int64_t) str.length) {
+                goto done;
+            }
+
+            to -= str.length - 1;
+        }
+
         for (i = from; i != to; i += increment) {
-            if (memcmp(&u8[i], str.start, str.length) == 0) {
+            if (memcmp(&u8[offset + i], str.start, str.length) == 0) {
                 index = i;
                 goto done;
             }
@@ -2219,12 +2094,8 @@ encoding:
     case NJS_NUMBER:
         byte = njs_number_to_uint32(njs_number(value));
 
-        if (last) {
-            from = njs_min(from, length - 1);
-        }
-
         for (i = from; i != to; i += increment) {
-            if (u8[i] == byte) {
+            if (u8[offset + i] == byte) {
                 index = i;
                 goto done;
             }
@@ -2241,7 +2112,7 @@ fail:
 
 done:
 
-    njs_set_number(retval, index);
+    njs_set_number(&vm->retval, index);
 
     return NJS_OK;
 }
@@ -2249,16 +2120,16 @@ done:
 
 static njs_int_t
 njs_buffer_prototype_includes(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+    njs_index_t unused)
 {
     njs_int_t  ret;
 
-    ret = njs_buffer_prototype_index_of(vm, args, nargs, unused, retval);
+    ret = njs_buffer_prototype_index_of(vm, args, nargs, unused);
     if (njs_slow_path(ret != NJS_OK)) {
         return ret;
     }
 
-    njs_set_boolean(retval, (njs_number(retval) != -1));
+    njs_set_boolean(&vm->retval, (njs_number(&vm->retval) != -1));
 
     return NJS_OK;
 }
@@ -2266,18 +2137,18 @@ njs_buffer_prototype_includes(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
 
 static njs_int_t
 njs_buffer_prototype_slice(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+    njs_index_t unused)
 {
     njs_int_t          ret;
     njs_typed_array_t  *array;
 
-    ret = njs_typed_array_prototype_slice(vm, args, nargs, unused, retval);
+    ret = njs_typed_array_prototype_slice(vm, args, nargs, unused);
     if (njs_slow_path(ret != NJS_OK)) {
         return ret;
     }
 
-    array = njs_typed_array(retval);
-    array->object.__proto__ = njs_vm_proto(vm, NJS_OBJ_TYPE_BUFFER);
+    array = njs_typed_array(&vm->retval);
+    array->object.__proto__ = &vm->prototypes[NJS_OBJ_TYPE_BUFFER].object;
 
     return NJS_OK;
 }
@@ -2285,7 +2156,7 @@ njs_buffer_prototype_slice(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
 
 static njs_int_t
 njs_buffer_prototype_swap(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t size, njs_value_t *retval)
+    njs_index_t size)
 {
     uint8_t             *p, *end;
     njs_typed_array_t   *array;
@@ -2332,7 +2203,7 @@ njs_buffer_prototype_swap(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
         }
     }
 
-    njs_set_typed_array(retval, array);
+    njs_set_typed_array(&vm->retval, array);
 
     return NJS_OK;
 }
@@ -2340,16 +2211,18 @@ njs_buffer_prototype_swap(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
 
 static njs_int_t
 njs_buffer_prototype_to_json(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
-    njs_index_t unused, njs_value_t *retval)
+    njs_index_t unused)
 {
     u_char              *p, *end;
     njs_int_t           ret;
-    njs_value_t         *value, setval;
+    njs_value_t         *value;
     njs_value_t         object, array;
     njs_array_t         *arr;
     njs_object_t        *obj;
     njs_typed_array_t   *ta;
     njs_array_buffer_t  *buffer;
+
+    static const njs_value_t  string_buffer = njs_string("Buffer");
 
     ta = njs_buffer_slot(vm, njs_argument(args, 0), "this");
     if (njs_slow_path(ta == NULL)) {
@@ -2362,9 +2235,9 @@ njs_buffer_prototype_to_json(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
     }
 
     njs_set_object(&object, obj);
-    njs_atom_to_value(vm, &setval, NJS_ATOM_STRING_Buffer);
 
-    ret = njs_value_property_set(vm, &object, NJS_ATOM_STRING_type, &setval);
+    ret = njs_value_property_set(vm, &object, njs_value_arg(&njs_string_type),
+                                 njs_value_arg(&string_buffer));
     if (njs_slow_path(ret != NJS_OK)) {
         return NJS_ERROR;
     }
@@ -2390,22 +2263,23 @@ njs_buffer_prototype_to_json(njs_vm_t *vm, njs_value_t *args, njs_uint_t nargs,
 
     njs_set_array(&array, arr);
 
-    ret = njs_value_property_set(vm, &object, NJS_ATOM_STRING_data, &array);
+    ret = njs_value_property_set(vm, &object, njs_value_arg(&njs_string_data),
+                                 &array);
     if (njs_slow_path(ret != NJS_OK)) {
         return NJS_ERROR;
     }
 
-    njs_set_object(retval, obj);
+    njs_set_object(&vm->retval, obj);
 
     return NJS_OK;
 }
 
 
 const njs_buffer_encoding_t *
-njs_buffer_encoding(njs_vm_t *vm, njs_value_t *value, njs_bool_t throw)
+njs_buffer_encoding(njs_vm_t *vm, const njs_value_t *value)
 {
-    njs_str_t                    name;
-    const njs_buffer_encoding_t  *encoding;
+    njs_str_t              name;
+    njs_buffer_encoding_t  *encoding;
 
     if (njs_slow_path(!njs_is_string(value))) {
         if (njs_is_defined(value)) {
@@ -2416,7 +2290,7 @@ njs_buffer_encoding(njs_vm_t *vm, njs_value_t *value, njs_bool_t throw)
         return &njs_buffer_encodings[0];
     }
 
-    njs_string_get(vm, value, &name);
+    njs_string_get(value, &name);
 
     for (encoding = &njs_buffer_encodings[0];
          encoding->name.length != 0;
@@ -2427,9 +2301,7 @@ njs_buffer_encoding(njs_vm_t *vm, njs_value_t *value, njs_bool_t throw)
         }
     }
 
-    if (throw) {
-        njs_type_error(vm, "\"%V\" encoding is not supported", &name);
-    }
+    njs_type_error(vm, "\"%V\" encoding is not supported", &name);
 
     return NULL;
 }
@@ -2443,7 +2315,7 @@ njs_buffer_decode_string(njs_vm_t *vm, const njs_value_t *value,
     njs_str_t          str;
     njs_string_prop_t  string;
 
-    (void) njs_string_prop(vm, &string, value);
+    (void) njs_string_prop(&string, value);
 
     str.start = string.start;
     str.length = string.size;
@@ -2463,197 +2335,159 @@ njs_buffer_decode_string(njs_vm_t *vm, const njs_value_t *value,
 }
 
 
-static const njs_object_prop_init_t  njs_buffer_prototype_properties[] =
+static const njs_object_prop_t  njs_buffer_prototype_properties[] =
 {
-    NJS_DECLARE_PROP_VALUE(SYMBOL_toStringTag, njs_ascii_strval("Buffer"),
-                           NJS_OBJECT_PROP_VALUE_C),
+    {
+        .type = NJS_PROPERTY,
+        .name = njs_wellknown_symbol(NJS_SYMBOL_TO_STRING_TAG),
+        .u.value = njs_string("Buffer"),
+        .configurable = 1,
+    },
 
-    NJS_DECLARE_PROP_HANDLER(STRING_constructor,
-                             njs_object_prototype_create_constructor, 0,
-                             NJS_OBJECT_PROP_VALUE_CW),
+    NJS_DECLARE_PROP_HANDLER("constructor",
+                             njs_object_prototype_create_constructor,
+                             0, 0, NJS_OBJECT_PROP_VALUE_CW),
 
-    NJS_DECLARE_PROP_HANDLER(STRING_length, njs_buffer_prototype_length, 0,
-                             0),
+    NJS_DECLARE_PROP_HANDLER("length", njs_buffer_prototype_length, 0, 0, 0),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_readInt8, njs_buffer_prototype_read_int,
-                            1, njs_buffer_magic(1, 1, 1)),
+    NJS_DECLARE_PROP_NATIVE("readInt8", njs_buffer_prototype_read_int, 1,
+                            njs_buffer_magic(1, 1, 1)),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_readUInt8, njs_buffer_prototype_read_int,
-                            1, njs_buffer_magic(1, 0, 1)),
+    NJS_DECLARE_PROP_NATIVE("readUInt8", njs_buffer_prototype_read_int, 1,
+                            njs_buffer_magic(1, 0, 1)),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_readInt16LE,
-                            njs_buffer_prototype_read_int, 1,
+    NJS_DECLARE_PROP_NATIVE("readInt16LE", njs_buffer_prototype_read_int, 1,
                             njs_buffer_magic(2, 1, 1)),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_readUInt16LE,
-                            njs_buffer_prototype_read_int, 1,
+    NJS_DECLARE_PROP_NATIVE("readUInt16LE", njs_buffer_prototype_read_int, 1,
                             njs_buffer_magic(2, 0, 1)),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_readInt16BE,
-                            njs_buffer_prototype_read_int, 1,
+    NJS_DECLARE_PROP_NATIVE("readInt16BE", njs_buffer_prototype_read_int, 1,
                             njs_buffer_magic(2, 1, 0)),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_readUInt16BE,
-                            njs_buffer_prototype_read_int, 1,
+    NJS_DECLARE_PROP_NATIVE("readUInt16BE", njs_buffer_prototype_read_int, 1,
                             njs_buffer_magic(2, 0, 0)),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_readInt32LE,
-                            njs_buffer_prototype_read_int, 1,
+    NJS_DECLARE_PROP_NATIVE("readInt32LE", njs_buffer_prototype_read_int, 1,
                             njs_buffer_magic(4, 1, 1)),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_readUInt32LE,
-                            njs_buffer_prototype_read_int, 1,
+    NJS_DECLARE_PROP_NATIVE("readUInt32LE", njs_buffer_prototype_read_int, 1,
                             njs_buffer_magic(4, 0, 1)),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_readInt32BE,
-                            njs_buffer_prototype_read_int, 1,
+    NJS_DECLARE_PROP_NATIVE("readInt32BE", njs_buffer_prototype_read_int, 1,
                             njs_buffer_magic(4, 1, 0)),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_readUInt32BE,
-                            njs_buffer_prototype_read_int, 1,
+    NJS_DECLARE_PROP_NATIVE("readUInt32BE", njs_buffer_prototype_read_int, 1,
                             njs_buffer_magic(4, 0, 0)),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_readIntLE,
-                            njs_buffer_prototype_read_int, 2,
+    NJS_DECLARE_PROP_NATIVE("readIntLE", njs_buffer_prototype_read_int, 2,
                             njs_buffer_magic(0, 1, 1)),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_readUIntLE,
-                            njs_buffer_prototype_read_int, 2,
+    NJS_DECLARE_PROP_NATIVE("readUIntLE", njs_buffer_prototype_read_int, 2,
                             njs_buffer_magic(0, 0, 1)),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_readIntBE,
-                            njs_buffer_prototype_read_int, 2,
+    NJS_DECLARE_PROP_NATIVE("readIntBE", njs_buffer_prototype_read_int, 2,
                             njs_buffer_magic(0, 1, 0)),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_readUIntBE,
-                            njs_buffer_prototype_read_int, 2,
+    NJS_DECLARE_PROP_NATIVE("readUIntBE", njs_buffer_prototype_read_int, 2,
                             njs_buffer_magic(0, 0, 0)),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_readFloatLE,
-                            njs_buffer_prototype_read_float, 1,
+    NJS_DECLARE_PROP_NATIVE("readFloatLE", njs_buffer_prototype_read_float, 1,
                             njs_buffer_magic(4, 0, 1)),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_readFloatBE,
-                            njs_buffer_prototype_read_float, 1,
+    NJS_DECLARE_PROP_NATIVE("readFloatBE", njs_buffer_prototype_read_float, 1,
                             njs_buffer_magic(4, 0, 0)),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_readDoubleLE,
-                            njs_buffer_prototype_read_float, 1,
+    NJS_DECLARE_PROP_NATIVE("readDoubleLE", njs_buffer_prototype_read_float, 1,
                             njs_buffer_magic(8, 0, 1)),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_readDoubleBE,
-                            njs_buffer_prototype_read_float, 1,
+    NJS_DECLARE_PROP_NATIVE("readDoubleBE", njs_buffer_prototype_read_float, 1,
                             njs_buffer_magic(8, 0, 0)),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_writeInt8,
-                            njs_buffer_prototype_write_int, 1,
+    NJS_DECLARE_PROP_NATIVE("writeInt8", njs_buffer_prototype_write_int, 1,
                             njs_buffer_magic(1, 1, 0)),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_writeUInt8,
-                            njs_buffer_prototype_write_int, 1,
+    NJS_DECLARE_PROP_NATIVE("writeUInt8", njs_buffer_prototype_write_int, 1,
                             njs_buffer_magic(1, 0, 0)),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_writeInt16LE,
-                            njs_buffer_prototype_write_int, 1,
+    NJS_DECLARE_PROP_NATIVE("writeInt16LE", njs_buffer_prototype_write_int, 1,
                             njs_buffer_magic(2, 1, 1)),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_writeUInt16LE,
-                            njs_buffer_prototype_write_int, 1,
+    NJS_DECLARE_PROP_NATIVE("writeUInt16LE", njs_buffer_prototype_write_int, 1,
                             njs_buffer_magic(2, 0, 1)),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_writeInt16BE,
-                            njs_buffer_prototype_write_int, 1,
+    NJS_DECLARE_PROP_NATIVE("writeInt16BE", njs_buffer_prototype_write_int, 1,
                             njs_buffer_magic(2, 1, 0)),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_writeUInt16BE,
-                            njs_buffer_prototype_write_int, 1,
+    NJS_DECLARE_PROP_NATIVE("writeUInt16BE", njs_buffer_prototype_write_int, 1,
                             njs_buffer_magic(2, 0, 0)),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_writeInt32LE,
-                            njs_buffer_prototype_write_int, 1,
+    NJS_DECLARE_PROP_NATIVE("writeInt32LE", njs_buffer_prototype_write_int, 1,
                             njs_buffer_magic(4, 1, 1)),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_writeUInt32LE,
-                            njs_buffer_prototype_write_int, 1,
+    NJS_DECLARE_PROP_NATIVE("writeUInt32LE", njs_buffer_prototype_write_int, 1,
                             njs_buffer_magic(4, 0, 1)),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_writeInt32BE,
-                            njs_buffer_prototype_write_int, 1,
+    NJS_DECLARE_PROP_NATIVE("writeInt32BE", njs_buffer_prototype_write_int, 1,
                             njs_buffer_magic(4, 1, 0)),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_writeUInt32BE,
-                            njs_buffer_prototype_write_int, 1,
+    NJS_DECLARE_PROP_NATIVE("writeUInt32BE", njs_buffer_prototype_write_int, 1,
                             njs_buffer_magic(4, 0, 0)),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_writeIntLE,
-                            njs_buffer_prototype_write_int, 1,
+    NJS_DECLARE_PROP_NATIVE("writeIntLE", njs_buffer_prototype_write_int, 1,
                             njs_buffer_magic(0, 1, 1)),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_writeUIntLE,
-                            njs_buffer_prototype_write_int, 1,
+    NJS_DECLARE_PROP_NATIVE("writeUIntLE", njs_buffer_prototype_write_int, 1,
                             njs_buffer_magic(0, 0, 1)),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_writeIntBE,
-                            njs_buffer_prototype_write_int, 1,
+    NJS_DECLARE_PROP_NATIVE("writeIntBE", njs_buffer_prototype_write_int, 1,
                             njs_buffer_magic(0, 1, 0)),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_writeUIntBE,
-                            njs_buffer_prototype_write_int, 1,
+    NJS_DECLARE_PROP_NATIVE("writeUIntBE", njs_buffer_prototype_write_int, 1,
                             njs_buffer_magic(0, 0, 0)),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_writeFloatLE,
-                            njs_buffer_prototype_write_float,
+    NJS_DECLARE_PROP_NATIVE("writeFloatLE", njs_buffer_prototype_write_float,
                             1, njs_buffer_magic(4, 0, 1)),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_writeFloatBE,
-                            njs_buffer_prototype_write_float,
+    NJS_DECLARE_PROP_NATIVE("writeFloatBE", njs_buffer_prototype_write_float,
                             1, njs_buffer_magic(4, 0, 0)),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_writeDoubleLE,
-                            njs_buffer_prototype_write_float,
+    NJS_DECLARE_PROP_NATIVE("writeDoubleLE", njs_buffer_prototype_write_float,
                             1, njs_buffer_magic(8, 0, 1)),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_writeDoubleBE,
-                            njs_buffer_prototype_write_float,
+    NJS_DECLARE_PROP_NATIVE("writeDoubleBE", njs_buffer_prototype_write_float,
                             1, njs_buffer_magic(8, 0, 0)),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_write, njs_buffer_prototype_write, 1, 0),
+    NJS_DECLARE_PROP_NATIVE("write", njs_buffer_prototype_write, 1, 0),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_fill, njs_buffer_prototype_fill, 1, 0),
+    NJS_DECLARE_PROP_NATIVE("fill", njs_buffer_prototype_fill, 1, 0),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_toString, njs_buffer_prototype_to_string,
-                            0, 0),
+    NJS_DECLARE_PROP_NATIVE("toString", njs_buffer_prototype_to_string, 0, 0),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_compare, njs_buffer_prototype_compare, 1,
-                            0),
+    NJS_DECLARE_PROP_NATIVE("compare", njs_buffer_prototype_compare, 1, 0),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_copy, njs_buffer_prototype_copy, 1, 0),
+    NJS_DECLARE_PROP_NATIVE("copy", njs_buffer_prototype_copy, 1, 0),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_equals, njs_buffer_prototype_equals, 1,
-                            0),
+    NJS_DECLARE_PROP_NATIVE("equals", njs_buffer_prototype_equals, 1, 0),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_indexOf, njs_buffer_prototype_index_of,
-                            1, 0),
+    NJS_DECLARE_PROP_NATIVE("indexOf", njs_buffer_prototype_index_of, 1, 0),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_lastIndexOf,
-                            njs_buffer_prototype_index_of, 1, 1),
+    NJS_DECLARE_PROP_NATIVE("lastIndexOf", njs_buffer_prototype_index_of, 1,
+                            1),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_includes, njs_buffer_prototype_includes, 1,
-                            0),
+    NJS_DECLARE_PROP_NATIVE("includes", njs_buffer_prototype_includes, 1, 0),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_subarray, njs_buffer_prototype_slice, 2,
-                            0),
+    NJS_DECLARE_PROP_NATIVE("subarray", njs_buffer_prototype_slice, 2, 0),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_slice, njs_buffer_prototype_slice, 2, 0),
+    NJS_DECLARE_PROP_NATIVE("slice", njs_buffer_prototype_slice, 2, 0),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_swap16, njs_buffer_prototype_swap, 0, 2),
+    NJS_DECLARE_PROP_NATIVE("swap16", njs_buffer_prototype_swap, 0, 2),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_swap32, njs_buffer_prototype_swap, 0, 4),
+    NJS_DECLARE_PROP_NATIVE("swap32", njs_buffer_prototype_swap, 0, 4),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_swap64, njs_buffer_prototype_swap, 0, 8),
+    NJS_DECLARE_PROP_NATIVE("swap64", njs_buffer_prototype_swap, 0, 8),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_toJSON, njs_buffer_prototype_to_json, 0,
-                            0),
+    NJS_DECLARE_PROP_NATIVE("toJSON", njs_buffer_prototype_to_json, 0, 0),
 };
 
 
@@ -2663,36 +2497,31 @@ const njs_object_init_t  njs_buffer_prototype_init = {
 };
 
 
-static const njs_object_prop_init_t  njs_buffer_constructor_properties[] =
+static const njs_object_prop_t  njs_buffer_constructor_properties[] =
 {
-    NJS_DECLARE_PROP_LENGTH(0),
-
     NJS_DECLARE_PROP_NAME("Buffer"),
 
-    NJS_DECLARE_PROP_HANDLER(STRING_prototype, njs_object_prototype_create,
-                             0, 0),
+    NJS_DECLARE_PROP_LENGTH(0),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_alloc, njs_buffer_alloc_safe, 0, 1),
+    NJS_DECLARE_PROP_HANDLER("prototype", njs_object_prototype_create, 0, 0, 0),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_allocUnsafe, njs_buffer_alloc_safe, 0,
-                            0),
+    NJS_DECLARE_PROP_NATIVE("alloc", njs_buffer_alloc_safe, 0, 1),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_allocUnsafeSlow, njs_buffer_alloc_safe,
-                            1, 0),
+    NJS_DECLARE_PROP_NATIVE("allocUnsafe", njs_buffer_alloc_safe, 0, 0),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_byteLength, njs_buffer_byte_length, 1,
-                            0),
+    NJS_DECLARE_PROP_LNATIVE("allocUnsafeSlow", njs_buffer_alloc_safe, 1, 0),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_compare, njs_buffer_compare, 2, 0),
+    NJS_DECLARE_PROP_NATIVE("byteLength", njs_buffer_byte_length, 1, 0),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_concat, njs_buffer_concat, 1, 0),
+    NJS_DECLARE_PROP_NATIVE("compare", njs_buffer_compare, 2, 0),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_from, njs_buffer_from, 3, 0),
+    NJS_DECLARE_PROP_NATIVE("concat", njs_buffer_concat, 1, 0),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_isBuffer, njs_buffer_is_buffer, 1, 0),
+    NJS_DECLARE_PROP_NATIVE("from", njs_buffer_from, 3, 0),
 
-    NJS_DECLARE_PROP_NATIVE(STRING_isEncoding, njs_buffer_is_encoding, 1,
-                            0),
+    NJS_DECLARE_PROP_NATIVE("isBuffer", njs_buffer_is_buffer, 1, 0),
+
+    NJS_DECLARE_PROP_NATIVE("isEncoding", njs_buffer_is_encoding, 1, 0),
 };
 
 
@@ -2710,15 +2539,14 @@ const njs_object_type_init_t  njs_buffer_type_init = {
 };
 
 
-static const njs_object_prop_init_t  njs_buffer_constants_properties[] =
+static const njs_object_prop_t  njs_buffer_constants_properties[] =
 {
-    NJS_DECLARE_PROP_VALUE(STRING_MAX_LENGTH,
-                           njs_value(NJS_NUMBER, 1, INT32_MAX),
+    NJS_DECLARE_PROP_VALUE("MAX_LENGTH", njs_value(NJS_NUMBER, 1, INT32_MAX),
                            NJS_OBJECT_PROP_VALUE_E),
 
-    NJS_DECLARE_PROP_VALUE(STRING_MAX_STRING_LENGTH,
-                           njs_value(NJS_NUMBER, 1, NJS_STRING_MAX_LENGTH),
-                           NJS_OBJECT_PROP_VALUE_E),
+    NJS_DECLARE_PROP_LVALUE("MAX_STRING_LENGTH",
+                            njs_value(NJS_NUMBER, 1, NJS_STRING_MAX_LENGTH),
+                            NJS_OBJECT_PROP_VALUE_E),
 };
 
 
@@ -2729,26 +2557,26 @@ static const njs_object_init_t  njs_buffer_constants_init = {
 
 
 static njs_int_t
-njs_buffer(njs_vm_t *vm, njs_object_prop_t *prop, uint32_t atom_id,
-    njs_value_t *value, njs_value_t *unused, njs_value_t *retval)
+njs_buffer(njs_vm_t *vm, njs_object_prop_t *prop, njs_value_t *value,
+    njs_value_t *unused, njs_value_t *retval)
 {
-    return njs_object_prop_init(vm, &njs_buffer_constructor_init, prop, atom_id,
-                                value, retval);
+    return njs_object_prop_init(vm, &njs_buffer_constructor_init, prop, value,
+                                retval);
 }
 
 
 static njs_int_t
-njs_buffer_constants(njs_vm_t *vm, njs_object_prop_t *prop, uint32_t atom_id,
-    njs_value_t *value, njs_value_t *unused, njs_value_t *retval)
+njs_buffer_constants(njs_vm_t *vm, njs_object_prop_t *prop, njs_value_t *value,
+    njs_value_t *unused, njs_value_t *retval)
 {
-    return njs_object_prop_init(vm, &njs_buffer_constants_init, prop, atom_id,
-                                value, retval);
+    return njs_object_prop_init(vm, &njs_buffer_constants_init, prop, value,
+                                retval);
 }
 
 
 static njs_int_t
-njs_buffer_constant(njs_vm_t *vm, njs_object_prop_t *prop, uint32_t not_used,
-    njs_value_t *value, njs_value_t *unused, njs_value_t *retval)
+njs_buffer_constant(njs_vm_t *vm, njs_object_prop_t *prop, njs_value_t *value,
+    njs_value_t *unused, njs_value_t *retval)
 {
     njs_value_number_set(retval, njs_vm_prop_magic32(prop));
 

@@ -219,6 +219,12 @@ typedef enum {
 
 
 typedef struct {
+    njs_str_t                       name;
+} njs_lexer_entry_t;
+
+
+typedef struct {
+    njs_lexer_entry_t               entry;
     njs_token_type_t                type;
     njs_bool_t                      reserved;
 } njs_keyword_t;
@@ -237,7 +243,7 @@ typedef struct {
     njs_token_type_t                type:16;
     njs_keyword_type_t              keyword_type;
     uint32_t                        line;
-    uint32_t                        atom_id;
+    uintptr_t                       unique_id;
     njs_str_t                       text;
     double                          number;
     njs_queue_link_t                link;
@@ -255,7 +261,9 @@ typedef struct {
     uint32_t                        line;
     njs_str_t                       file;
 
-    njs_vm_t                        *vm;
+    njs_lvlhsh_t                    *keywords_hash;
+
+    njs_mp_t                        *mem_pool;
 
     u_char                          *start;
     u_char                          *end;
@@ -268,7 +276,8 @@ typedef struct {
 
 
 njs_int_t njs_lexer_init(njs_vm_t *vm, njs_lexer_t *lexer, njs_str_t *file,
-    u_char *start, u_char *end);
+    u_char *start, u_char *end, njs_uint_t runtime,
+    njs_int_t init_lexer_memory);
 
 njs_lexer_token_t *njs_lexer_token(njs_lexer_t *lexer,
     njs_bool_t with_end_line);
@@ -286,6 +295,13 @@ njs_int_t njs_lexer_in_fail_get(njs_lexer_t *lexer);
 const njs_lexer_keyword_entry_t *njs_lexer_keyword(const u_char *key,
     size_t length);
 njs_int_t njs_lexer_keywords(njs_arr_t *array);
+
+
+njs_inline const njs_lexer_entry_t *
+njs_lexer_entry(uintptr_t unique_id)
+{
+    return (const njs_lexer_entry_t *) unique_id;
+}
 
 
 njs_inline njs_bool_t
@@ -346,5 +362,9 @@ njs_lexer_token_is_identifier_reference(njs_lexer_token_t *token)
 {
     return njs_lexer_token_is_binding_identifier(token);
 }
+
+
+extern const njs_lvlhsh_proto_t  njs_lexer_hash_proto;
+
 
 #endif /* _NJS_LEXER_H_INCLUDED_ */

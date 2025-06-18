@@ -26,8 +26,7 @@ struct njs_parser_scope_s {
     uint8_t                         arrow_function;
     uint8_t                         dest_disable;
     uint8_t                         async;
-    uint32_t                        in_args;
-    uint32_t                        in_tagged_template;
+    uint8_t                         in_args;
 };
 
 
@@ -42,7 +41,7 @@ struct njs_parser_node_s {
         uint32_t                    length;
         njs_variable_reference_t    reference;
         njs_value_t                 value;
-        njs_vmcode_t                operation;
+        njs_vmcode_operation_t      operation;
         njs_parser_node_t           *object;
         njs_mod_t                   *module;
     } u;
@@ -80,10 +79,12 @@ struct njs_parser_s {
     njs_parser_scope_t              *scope;
     njs_variable_type_t             var_type;
     njs_int_t                       ret;
+    uintptr_t                       undefined_id;
 
     uint8_t                         use_lhs;
 
     uint8_t                         module;
+    njs_bool_t                      strict_semicolon;
 
     njs_str_t                       file;
     uint32_t                        line;
@@ -108,9 +109,8 @@ typedef struct {
 
 
 typedef struct {
-    njs_function_lambda_t           *lambda;
+    njs_value_t                     *value;
     njs_index_t                     index;
-    njs_bool_t                      async;
 } njs_declaration_t;
 
 
@@ -124,7 +124,8 @@ njs_int_t njs_parser_failed_state(njs_parser_t *parser,
 intptr_t njs_parser_scope_rbtree_compare(njs_rbtree_node_t *node1,
     njs_rbtree_node_t *node2);
 njs_int_t njs_parser_init(njs_vm_t *vm, njs_parser_t *parser,
-    njs_parser_scope_t *scope, njs_str_t *file, u_char *start, u_char *end);
+    njs_parser_scope_t *scope, njs_str_t *file, u_char *start, u_char *end,
+    njs_uint_t runtime);
 njs_int_t njs_parser(njs_vm_t *vm, njs_parser_t *parser);
 
 njs_bool_t njs_variable_closure_test(njs_parser_scope_t *root,
@@ -133,7 +134,7 @@ njs_variable_t *njs_variable_resolve(njs_vm_t *vm, njs_parser_node_t *node);
 njs_index_t njs_variable_index(njs_vm_t *vm, njs_parser_node_t *node);
 njs_bool_t njs_parser_has_side_effect(njs_parser_node_t *node);
 njs_int_t njs_parser_variable_reference(njs_parser_t *parser,
-    njs_parser_scope_t *scope, njs_parser_node_t *node, uintptr_t atom_id,
+    njs_parser_scope_t *scope, njs_parser_node_t *node, uintptr_t unique_id,
     njs_reference_type_t type);
 njs_token_type_t njs_parser_unexpected_token(njs_vm_t *vm, njs_parser_t *parser,
     njs_str_t *name, njs_token_type_t type);

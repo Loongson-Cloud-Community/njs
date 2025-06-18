@@ -4,8 +4,8 @@ interface Console {
     log(...args: any[]): void;
     dump(...args: any[]): void;
 
-    time(label?: string): void;
-    timeEnd(label?: string): void;
+    time(label?: NjsStringLike): void;
+    timeEnd(label?: NjsStringLike): void;
 }
 
 declare const console: Console;

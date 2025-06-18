@@ -1,9 +1,13 @@
 /*---
 includes: []
 flags: []
-paths: [test/js/module/, test/js/module/libs/, test/js/module/sub]
+paths: [test/js/module/, test/js/module/libs/]
 ---*/
 
-import lib2 from 'lib2.js';
+import lib2   from 'lib2.js';
 
-assert.sameValue(lib2.hash(), "XXX");
+import crypto from 'crypto';
+var h = crypto.createHash('md5');
+var hash = h.update('AB').digest('hex');
+
+assert.sameValue(lib2.hash(), hash);

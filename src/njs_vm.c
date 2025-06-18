@@ -8,7 +8,8 @@
 #include <njs_main.h>
 
 
-static njs_int_t njs_vm_protos_init(njs_vm_t *vm, njs_value_t *global);
+static njs_int_t njs_vm_init(njs_vm_t *vm);
+static njs_int_t njs_vm_handle_events(njs_vm_t *vm);
 
 
 const njs_str_t  njs_entry_empty =          njs_str("");
@@ -24,6 +25,7 @@ njs_vm_opt_init(njs_vm_opt_t *options)
 {
     njs_memzero(options, sizeof(njs_vm_opt_t));
 
+    options->log_level = NJS_LOG_LEVEL_INFO;
     options->max_stack_size = NJS_MAX_STACK_SIZE;
 }
 
@@ -76,48 +78,16 @@ njs_vm_create(njs_vm_opt_t *options)
     vm->trace.size = 2048;
     vm->trace.data = vm;
 
+    njs_set_undefined(&vm->retval);
+
     if (options->init) {
-        ret = njs_vm_runtime_init(vm);
+        ret = njs_vm_init(vm);
         if (njs_slow_path(ret != NJS_OK)) {
             return NULL;
         }
     }
 
     for (i = 0; njs_modules[i] != NULL; i++) {
-        if (njs_modules[i]->preinit == NULL) {
-            continue;
-        }
-
-        ret = njs_modules[i]->preinit(vm);
-        if (njs_slow_path(ret != NJS_OK)) {
-            return NULL;
-        }
-    }
-
-    if (options->addons != NULL) {
-        addons = options->addons;
-        for (i = 0; addons[i] != NULL; i++) {
-            if (addons[i]->preinit == NULL) {
-                continue;
-            }
-
-            ret = addons[i]->preinit(vm);
-            if (njs_slow_path(ret != NJS_OK)) {
-                return NULL;
-            }
-        }
-    }
-
-    ret = njs_vm_protos_init(vm, &vm->global_value);
-    if (njs_slow_path(ret != NJS_OK)) {
-        return NULL;
-    }
-
-    for (i = 0; njs_modules[i] != NULL; i++) {
-        if (njs_modules[i]->init == NULL) {
-            continue;
-        }
-
         ret = njs_modules[i]->init(vm);
         if (njs_slow_path(ret != NJS_OK)) {
             return NULL;
@@ -127,16 +97,14 @@ njs_vm_create(njs_vm_opt_t *options)
     if (options->addons != NULL) {
         addons = options->addons;
         for (i = 0; addons[i] != NULL; i++) {
-            if (addons[i]->init == NULL) {
-                continue;
-            }
-
             ret = addons[i]->init(vm);
             if (njs_slow_path(ret != NJS_OK)) {
                 return NULL;
             }
         }
     }
+
+    vm->symbol_generator = NJS_SYMBOL_KNOWN_MAX;
 
     if (njs_scope_undefined_index(vm, 0) == NJS_INDEX_ERROR) {
         return NULL;
@@ -146,56 +114,28 @@ njs_vm_create(njs_vm_opt_t *options)
 }
 
 
-njs_int_t
-njs_vm_ctor_push(njs_vm_t *vm)
-{
-    njs_function_t          *ctor;
-    njs_vm_shared_t         *shared;
-    njs_object_prototype_t  *prototype;
-
-    shared = vm->shared;
-
-    if (shared->constructors == NULL) {
-        shared->constructors = njs_arr_create(vm->mem_pool,
-                                              NJS_OBJ_TYPE_MAX + 8,
-                                              sizeof(njs_function_t));
-        if (njs_slow_path(shared->constructors == NULL)) {
-            njs_memory_error(vm);
-            return -1;
-        }
-
-        shared->prototypes = njs_arr_create(vm->mem_pool,
-                                              NJS_OBJ_TYPE_MAX + 8,
-                                              sizeof(njs_object_prototype_t));
-        if (njs_slow_path(shared->prototypes == NULL)) {
-            njs_memory_error(vm);
-            return -1;
-        }
-    }
-
-    ctor = njs_arr_add(shared->constructors);
-    if (njs_slow_path(ctor == NULL)) {
-        njs_memory_error(vm);
-        return -1;
-    }
-
-    prototype = njs_arr_add(shared->prototypes);
-    if (njs_slow_path(prototype == NULL)) {
-        njs_memory_error(vm);
-        return -1;
-    }
-
-    njs_assert(shared->constructors->items == shared->prototypes->items);
-
-    return shared->constructors->items - 1;
-}
-
-
 void
 njs_vm_destroy(njs_vm_t *vm)
 {
+    njs_event_t        *event;
+    njs_lvlhsh_each_t  lhe;
+
     if (vm->hooks[NJS_HOOK_EXIT] != NULL) {
         (void) njs_vm_call(vm, vm->hooks[NJS_HOOK_EXIT], NULL, 0);
+    }
+
+    if (njs_waiting_events(vm)) {
+        njs_lvlhsh_each_init(&lhe, &njs_event_hash_proto);
+
+        for ( ;; ) {
+            event = njs_lvlhsh_each(&vm->events_hash, &lhe);
+
+            if (event == NULL) {
+                break;
+            }
+
+            njs_del_event(vm, event, NJS_EVENT_RELEASE);
+        }
     }
 
     njs_mp_destroy(vm->mem_pool);
@@ -220,7 +160,7 @@ njs_vm_compile(njs_vm_t *vm, u_char **start, u_char *end)
     global_items = (vm->global_scope != NULL) ? vm->global_scope->items : 0;
 
     ret = njs_parser_init(vm, &parser, vm->global_scope, &vm->options.file,
-                          *start, end);
+                          *start, end, 0);
     if (njs_slow_path(ret != NJS_OK)) {
         return NJS_ERROR;
     }
@@ -231,7 +171,7 @@ njs_vm_compile(njs_vm_t *vm, u_char **start, u_char *end)
     }
 
     if (njs_slow_path(vm->options.ast)) {
-        NJS_CHB_MP_INIT(&chain, njs_vm_memory_pool(vm));
+        njs_chb_init(&chain, vm->mem_pool);
         ret = njs_parser_serialize_ast(parser.node, &chain);
         if (njs_slow_path(ret == NJS_ERROR)) {
             return ret;
@@ -258,7 +198,7 @@ njs_vm_compile(njs_vm_t *vm, u_char **start, u_char *end)
 
     code = njs_generate_scope(vm, &generator, scope, &njs_entry_main);
     if (njs_slow_path(code == NULL)) {
-        if (!njs_is_error(&vm->exception)) {
+        if (!njs_is_error(&vm->retval)) {
             njs_internal_error(vm, "njs_generate_scope() failed");
         }
 
@@ -310,6 +250,7 @@ njs_vm_compile_module(njs_vm_t *vm, njs_str_t *name, u_char **start,
     u_char *end)
 {
     njs_int_t              ret;
+    njs_arr_t              *arr;
     njs_mod_t              *module;
     njs_parser_t           parser;
     njs_vm_code_t          *code;
@@ -327,7 +268,7 @@ njs_vm_compile_module(njs_vm_t *vm, njs_str_t *name, u_char **start,
         return NULL;
     }
 
-    ret = njs_parser_init(vm, &parser, NULL, name, *start, end);
+    ret = njs_parser_init(vm, &parser, NULL, name, *start, end, 1);
     if (njs_slow_path(ret != NJS_OK)) {
         return NULL;
     }
@@ -365,20 +306,13 @@ njs_vm_compile_module(njs_vm_t *vm, njs_str_t *name, u_char **start,
     lambda->start = generator.code_start;
     lambda->nlocal = scope->items;
 
+    arr = scope->declarations;
+    lambda->declarations = (arr != NULL) ? arr->start : NULL;
+    lambda->ndeclarations = (arr != NULL) ? arr->items : 0;
+
     module->function.u.lambda = lambda;
 
     return module;
-}
-
-
-njs_int_t
-njs_vm_reuse(njs_vm_t *vm)
-{
-    vm->active_frame = NULL;
-    vm->top_frame = NULL;
-    vm->modules = NULL;
-
-    return njs_object_make_shared(vm, njs_object(&vm->global_value));
 }
 
 
@@ -388,7 +322,7 @@ njs_vm_clone(njs_vm_t *vm, njs_external_ptr_t external)
     njs_mp_t     *nmp;
     njs_vm_t     *nvm;
     njs_int_t    ret;
-    njs_value_t  **global, **value;
+    njs_value_t  **global;
 
     njs_thread_log_debug("CLONE:");
 
@@ -412,17 +346,7 @@ njs_vm_clone(njs_vm_t *vm, njs_external_ptr_t external)
     nvm->trace.data = nvm;
     nvm->external = external;
 
-    nvm->shared_atom_count = vm->atom_id_generator;
-
-    njs_lvlhsh_init(&nvm->atom_hash);
-    nvm->atom_hash_current = &nvm->atom_hash;
-
-    ret = njs_vm_runtime_init(nvm);
-    if (njs_slow_path(ret != NJS_OK)) {
-        goto fail;
-    }
-
-    ret = njs_vm_protos_init(nvm, &nvm->global_value);
+    ret = njs_vm_init(nvm);
     if (njs_slow_path(ret != NJS_OK)) {
         goto fail;
     }
@@ -432,25 +356,9 @@ njs_vm_clone(njs_vm_t *vm, njs_external_ptr_t external)
         goto fail;
     }
 
-    if (nvm->options.unsafe) {
-        nvm->scope_absolute = njs_arr_create(nvm->mem_pool,
-                                             vm->scope_absolute->items,
-                                             sizeof(njs_value_t *));
-        if (njs_slow_path(nvm->scope_absolute == NULL)) {
-            goto fail;
-        }
-
-        value = njs_arr_add_multiple(nvm->scope_absolute,
-                                     vm->scope_absolute->items);
-        if (njs_slow_path(value == NULL)) {
-            goto fail;
-        }
-
-        memcpy(value, vm->scope_absolute->start,
-               vm->scope_absolute->items * sizeof(njs_value_t *));
-    }
-
     nvm->levels[NJS_LEVEL_GLOBAL] = global;
+
+    njs_set_object(&nvm->global_value, &nvm->global_object);
 
     /* globalThis and this */
     njs_scope_value_set(nvm, njs_scope_global_this_index(), &nvm->global_value);
@@ -467,137 +375,43 @@ fail:
 }
 
 
-njs_int_t
-njs_vm_runtime_init(njs_vm_t *vm)
+static njs_int_t
+njs_vm_init(njs_vm_t *vm)
 {
     njs_int_t    ret;
     njs_frame_t  *frame;
 
-    if (vm->active_frame == NULL) {
-        frame = (njs_frame_t *) njs_function_frame_alloc(vm, NJS_FRAME_SIZE);
-        if (njs_slow_path(frame == NULL)) {
-            njs_memory_error(vm);
-            return NJS_ERROR;
-        }
-
-        frame->exception.catch = NULL;
-        frame->exception.next = NULL;
-        frame->previous_active_frame = NULL;
-
-        vm->active_frame = frame;
+    frame = (njs_frame_t *) njs_function_frame_alloc(vm, NJS_FRAME_SIZE);
+    if (njs_slow_path(frame == NULL)) {
+        njs_memory_error(vm);
+        return NJS_ERROR;
     }
+
+    frame->exception.catch = NULL;
+    frame->exception.next = NULL;
+    frame->previous_active_frame = NULL;
+
+    vm->active_frame = frame;
 
     ret = njs_regexp_init(vm);
     if (njs_slow_path(ret != NJS_OK)) {
         return NJS_ERROR;
     }
 
-    njs_lvlhsh_init(&vm->values_hash);
-
-    njs_lvlhsh_init(&vm->modules_hash);
-
-    njs_rbtree_init(&vm->global_symbols, njs_symbol_rbtree_cmp);
-
-    njs_queue_init(&vm->jobs);
-
-    return NJS_OK;
-}
-
-
-void
-njs_vm_constructors_init(njs_vm_t *vm)
-{
-    njs_uint_t    i;
-    njs_object_t  *object_prototype, *function_prototype,
-                  *typed_array_prototype, *error_prototype, *async_prototype,
-                  *typed_array_ctor, *error_ctor;
-
-    object_prototype = njs_vm_proto(vm, NJS_OBJ_TYPE_OBJECT);
-
-    for (i = NJS_OBJ_TYPE_ARRAY; i < NJS_OBJ_TYPE_NORMAL_MAX; i++) {
-        vm->prototypes[i].object.__proto__ = object_prototype;
-    }
-
-    typed_array_prototype = njs_vm_proto(vm, NJS_OBJ_TYPE_TYPED_ARRAY);
-
-    for (i = NJS_OBJ_TYPE_TYPED_ARRAY_MIN;
-         i < NJS_OBJ_TYPE_TYPED_ARRAY_MAX;
-         i++)
-    {
-        vm->prototypes[i].object.__proto__ = typed_array_prototype;
-    }
-
-    vm->prototypes[NJS_OBJ_TYPE_ARRAY_ITERATOR].object.__proto__ =
-                                       njs_vm_proto(vm, NJS_OBJ_TYPE_ITERATOR);
-
-    vm->prototypes[NJS_OBJ_TYPE_BUFFER].object.__proto__ =
-                                    njs_vm_proto(vm, NJS_OBJ_TYPE_UINT8_ARRAY);
-
-    error_prototype = njs_vm_proto(vm, NJS_OBJ_TYPE_ERROR);
-    error_prototype->__proto__ = object_prototype;
-
-    for (i = NJS_OBJ_TYPE_EVAL_ERROR; i < vm->constructors_size; i++) {
-        vm->prototypes[i].object.__proto__ = error_prototype;
-    }
-
-    function_prototype = njs_vm_proto(vm, NJS_OBJ_TYPE_FUNCTION);
-
-    async_prototype = njs_vm_proto(vm, NJS_OBJ_TYPE_ASYNC_FUNCTION);
-    async_prototype->__proto__ = function_prototype;
-
-    for (i = NJS_OBJ_TYPE_OBJECT; i < NJS_OBJ_TYPE_NORMAL_MAX; i++) {
-        vm->constructors[i].object.__proto__ = function_prototype;
-    }
-
-    typed_array_ctor = &njs_vm_ctor(vm, NJS_OBJ_TYPE_TYPED_ARRAY).object;
-
-    for (i = NJS_OBJ_TYPE_TYPED_ARRAY_MIN;
-         i < NJS_OBJ_TYPE_TYPED_ARRAY_MAX;
-         i++)
-    {
-        vm->constructors[i].object.__proto__ = typed_array_ctor;
-    }
-
-    error_ctor = &njs_vm_ctor(vm, NJS_OBJ_TYPE_ERROR).object;
-    error_ctor->__proto__ = function_prototype;
-
-    for (i = NJS_OBJ_TYPE_EVAL_ERROR; i < vm->constructors_size; i++) {
-        vm->constructors[i].object.__proto__ = error_ctor;
-    }
-}
-
-
-static njs_int_t
-njs_vm_protos_init(njs_vm_t *vm, njs_value_t *global)
-{
-    size_t  ctor_size, proto_size;
-
-    vm->constructors_size = vm->shared->constructors->items;
-
-    ctor_size = vm->constructors_size * sizeof(njs_function_t);
-    proto_size = vm->constructors_size * sizeof(njs_object_prototype_t);
-
-    vm->constructors = njs_mp_alloc(vm->mem_pool, ctor_size + proto_size);
-    if (njs_slow_path(vm->constructors == NULL)) {
-        njs_memory_error(vm);
+    ret = njs_builtin_objects_clone(vm, &vm->global_value);
+    if (njs_slow_path(ret != NJS_OK)) {
         return NJS_ERROR;
     }
 
-    vm->prototypes = (njs_object_prototype_t *)
-                                     ((u_char *) vm->constructors + ctor_size);
+    njs_lvlhsh_init(&vm->values_hash);
+    njs_lvlhsh_init(&vm->keywords_hash);
+    njs_lvlhsh_init(&vm->modules_hash);
+    njs_lvlhsh_init(&vm->events_hash);
 
-    memcpy(vm->constructors, vm->shared->constructors->start, ctor_size);
-    memcpy(vm->prototypes, vm->shared->prototypes->start, proto_size);
+    njs_rbtree_init(&vm->global_symbols, njs_symbol_rbtree_cmp);
 
-    njs_vm_constructors_init(vm);
-
-    vm->global_object.__proto__ = njs_vm_proto(vm, NJS_OBJ_TYPE_OBJECT);
-
-    njs_set_undefined(global);
-    njs_set_object(global, &vm->global_object);
-
-    vm->string_object = vm->shared->string_object;
-    vm->string_object.__proto__ = njs_vm_proto(vm, NJS_OBJ_TYPE_STRING);
+    njs_queue_init(&vm->posted_events);
+    njs_queue_init(&vm->promise_events);
 
     return NJS_OK;
 }
@@ -607,9 +421,7 @@ njs_int_t
 njs_vm_call(njs_vm_t *vm, njs_function_t *function, const njs_value_t *args,
     njs_uint_t nargs)
 {
-    njs_value_t  unused;
-
-    return njs_vm_invoke(vm, function, args, nargs, &unused);
+    return njs_vm_invoke(vm, function, args, nargs, &vm->retval);
 }
 
 
@@ -630,11 +442,12 @@ njs_vm_invoke(njs_vm_t *vm, njs_function_t *function, const njs_value_t *args,
 
 
 void
-njs_vm_scopes_restore(njs_vm_t *vm, njs_native_frame_t *native)
+njs_vm_scopes_restore(njs_vm_t *vm, njs_native_frame_t *native,
+    njs_native_frame_t *previous)
 {
     njs_frame_t  *frame;
 
-    vm->top_frame = native->previous;
+    vm->top_frame = previous;
 
     if (native->function->native) {
         return;
@@ -646,119 +459,207 @@ njs_vm_scopes_restore(njs_vm_t *vm, njs_native_frame_t *native)
 }
 
 
-njs_int_t
-njs_vm_pending(njs_vm_t *vm)
+njs_vm_event_t
+njs_vm_add_event(njs_vm_t *vm, njs_function_t *function, njs_uint_t once,
+    njs_host_event_t host_ev, njs_event_destructor_t destructor)
 {
-    return !njs_queue_is_empty(&(vm)->jobs);
+    njs_event_t  *event;
+
+    event = njs_mp_alloc(vm->mem_pool, sizeof(njs_event_t));
+    if (njs_slow_path(event == NULL)) {
+        return NULL;
+    }
+
+    event->host_event = host_ev;
+    event->destructor = destructor;
+    event->function = function;
+    event->once = once;
+    event->posted = 0;
+    event->nargs = 0;
+    event->args = NULL;
+
+    if (njs_add_event(vm, event) != NJS_OK) {
+        return NULL;
+    }
+
+    return event;
+}
+
+
+void
+njs_vm_del_event(njs_vm_t *vm, njs_vm_event_t vm_event)
+{
+    njs_event_t  *event;
+
+    event = (njs_event_t *) vm_event;
+
+    njs_del_event(vm, event, NJS_EVENT_RELEASE | NJS_EVENT_DELETE);
 }
 
 
 njs_int_t
-njs_vm_enqueue_job(njs_vm_t *vm, njs_function_t *function,
+njs_vm_waiting(njs_vm_t *vm)
+{
+    return njs_waiting_events(vm);
+}
+
+
+njs_int_t
+njs_vm_posted(njs_vm_t *vm)
+{
+    return njs_posted_events(vm) || njs_promise_events(vm);
+}
+
+
+njs_int_t
+njs_vm_post_event(njs_vm_t *vm, njs_vm_event_t vm_event,
     const njs_value_t *args, njs_uint_t nargs)
 {
     njs_event_t  *event;
 
-    event = njs_mp_zalloc(vm->mem_pool, sizeof(njs_event_t));
-    if (njs_slow_path(event == NULL)) {
-        njs_memory_error(vm);
-        return NJS_ERROR;
-    }
+    event = (njs_event_t *) vm_event;
 
-    event->function = function;
-
-    if (nargs != 0) {
+    if (nargs != 0 && !event->posted) {
+        event->nargs = nargs;
         event->args = njs_mp_alloc(vm->mem_pool, sizeof(njs_value_t) * nargs);
         if (njs_slow_path(event->args == NULL)) {
-            njs_memory_error(vm);
             return NJS_ERROR;
         }
 
         memcpy(event->args, args, sizeof(njs_value_t) * nargs);
-
-        event->nargs = nargs;
     }
 
-    njs_queue_insert_tail(&vm->jobs, &event->link);
+    if (!event->posted) {
+        event->posted = 1;
+        njs_queue_insert_tail(&vm->posted_events, &event->link);
+    }
 
     return NJS_OK;
 }
 
 
 njs_int_t
-njs_vm_start(njs_vm_t *vm, njs_value_t *retval)
+njs_vm_run(njs_vm_t *vm)
+{
+    return njs_vm_handle_events(vm);
+}
+
+
+njs_int_t
+njs_vm_start(njs_vm_t *vm)
 {
     njs_int_t  ret;
 
-    ret = njs_vmcode_interpreter(vm, vm->start, retval, NULL, NULL);
+    ret = njs_vmcode_interpreter(vm, vm->start, NULL, NULL);
 
     return (ret == NJS_ERROR) ? NJS_ERROR : NJS_OK;
 }
 
 
-njs_int_t
-njs_vm_execute_pending_job(njs_vm_t *vm)
+static njs_int_t
+njs_vm_handle_events(njs_vm_t *vm)
 {
     njs_int_t         ret;
+    njs_str_t         str;
+    njs_value_t       string;
     njs_event_t       *ev;
-    njs_queue_t       *jobs;
+    njs_queue_t       *promise_events, *posted_events;
     njs_queue_link_t  *link;
 
-    jobs = &vm->jobs;
+    promise_events = &vm->promise_events;
+    posted_events = &vm->posted_events;
 
-    link = njs_queue_first(jobs);
+    do {
+        for ( ;; ) {
+            link = njs_queue_first(promise_events);
 
-    if (link == njs_queue_tail(jobs)) {
-        return NJS_OK;
+            if (link == njs_queue_tail(promise_events)) {
+                break;
+            }
+
+            ev = njs_queue_link_data(link, njs_event_t, link);
+
+            njs_queue_remove(&ev->link);
+
+            ret = njs_vm_call(vm, ev->function, ev->args, ev->nargs);
+            if (njs_slow_path(ret == NJS_ERROR)) {
+                return ret;
+            }
+        }
+
+        if (njs_vm_unhandled_rejection(vm)) {
+            njs_value_assign(&string, &vm->promise_reason->start[0]);
+            ret = njs_value_to_string(vm, &string, &string);
+            if (njs_slow_path(ret != NJS_OK)) {
+                return ret;
+            }
+
+            njs_string_get(&string, &str);
+            njs_vm_error(vm, "unhandled promise rejection: %V", &str);
+
+            njs_mp_free(vm->mem_pool, vm->promise_reason);
+            vm->promise_reason = NULL;
+
+            return NJS_ERROR;
+        }
+
+        for ( ;; ) {
+            link = njs_queue_first(posted_events);
+
+            if (link == njs_queue_tail(posted_events)) {
+                break;
+            }
+
+            ev = njs_queue_link_data(link, njs_event_t, link);
+
+            if (ev->once) {
+                njs_del_event(vm, ev, NJS_EVENT_RELEASE | NJS_EVENT_DELETE);
+
+            } else {
+                ev->posted = 0;
+                njs_queue_remove(&ev->link);
+            }
+
+            ret = njs_vm_call(vm, ev->function, ev->args, ev->nargs);
+
+            if (ret == NJS_ERROR) {
+                return ret;
+            }
+        }
+
+    } while (!njs_queue_is_empty(promise_events));
+
+    return njs_vm_pending(vm) ? NJS_AGAIN : NJS_OK;
+}
+
+
+njs_int_t
+njs_vm_add_path(njs_vm_t *vm, const njs_str_t *path)
+{
+    njs_str_t  *item;
+
+    if (vm->paths == NULL) {
+        vm->paths = njs_arr_create(vm->mem_pool, 4, sizeof(njs_str_t));
+        if (njs_slow_path(vm->paths == NULL)) {
+            return NJS_ERROR;
+        }
     }
 
-    ev = njs_queue_link_data(link, njs_event_t, link);
-
-    njs_queue_remove(&ev->link);
-
-    ret = njs_vm_call(vm, ev->function, ev->args, ev->nargs);
-    if (ret == NJS_ERROR) {
-        return ret;
+    item = njs_arr_add(vm->paths);
+    if (njs_slow_path(item == NULL)) {
+        return NJS_ERROR;
     }
 
-    return 1;
+    *item = *path;
+
+    return NJS_OK;
 }
 
 
-void
-njs_vm_set_module_loader(njs_vm_t *vm, njs_module_loader_t module_loader,
-    void *opaque)
+njs_value_t *
+njs_vm_retval(njs_vm_t *vm)
 {
-    vm->module_loader = module_loader;
-    vm->module_loader_opaque = opaque;
-}
-
-
-void
-njs_vm_set_rejection_tracker(njs_vm_t *vm,
-    njs_rejection_tracker_t rejection_tracker, void *opaque)
-{
-    vm->rejection_tracker = rejection_tracker;
-    vm->rejection_tracker_opaque = opaque;
-}
-
-
-njs_value_t
-njs_vm_exception(njs_vm_t *vm)
-{
-    njs_value_t  value;
-
-    value = vm->exception;
-    njs_set_invalid(&vm->exception);
-
-    return value;
-}
-
-
-void
-njs_vm_exception_get(njs_vm_t *vm, njs_value_t *retval)
-{
-    *retval = njs_vm_exception(vm);
+    return &vm->retval;
 }
 
 
@@ -776,13 +677,6 @@ njs_vm_external_ptr(njs_vm_t *vm)
 }
 
 
-njs_bool_t
-njs_vm_constructor(njs_vm_t *vm)
-{
-    return vm->top_frame->ctor;
-}
-
-
 uintptr_t
 njs_vm_meta(njs_vm_t *vm, njs_uint_t index)
 {
@@ -797,56 +691,10 @@ njs_vm_meta(njs_vm_t *vm, njs_uint_t index)
 }
 
 
-njs_vm_opt_t *
-njs_vm_options(njs_vm_t *vm)
-{
-    return &vm->options;
-}
-
-
 void
-njs_vm_throw(njs_vm_t *vm, const njs_value_t *value)
+njs_vm_retval_set(njs_vm_t *vm, const njs_value_t *value)
 {
-    vm->exception = *value;
-}
-
-
-void
-njs_vm_error2(njs_vm_t *vm, unsigned error_type, const char *fmt, ...)
-{
-    va_list  args;
-
-    if (error_type > (NJS_OBJ_TYPE_ERROR_MAX - NJS_OBJ_TYPE_ERROR)) {
-        return;
-    }
-
-    va_start(args, fmt);
-    error_type += NJS_OBJ_TYPE_ERROR;
-    njs_throw_error_va(vm, njs_vm_proto(vm, error_type), fmt, args);
-    va_end(args);
-}
-
-
-void
-njs_vm_error3(njs_vm_t *vm, unsigned type, const char *fmt, ...)
-{
-    va_list  args;
-
-    if (type > vm->constructors_size) {
-        return;
-    }
-
-    va_start(args, fmt);
-    njs_throw_error_va(vm, njs_vm_proto(vm, type), fmt, args);
-    va_end(args);
-}
-
-
-njs_int_t
-njs_vm_global(njs_vm_t *vm, njs_value_t *retval)
-{
-    njs_value_assign(retval, &vm->global_value);
-    return NJS_OK;
+    vm->retval = *value;
 }
 
 
@@ -861,7 +709,7 @@ njs_vm_value(njs_vm_t *vm, const njs_str_t *path, njs_value_t *retval)
     start = path->start;
     end = start + path->length;
 
-    njs_value_assign(&value, &vm->global_value);
+    njs_set_object(&value, &vm->global_object);
 
     for ( ;; ) {
         p = njs_strlchr(start, end, '.');
@@ -872,14 +720,13 @@ njs_vm_value(njs_vm_t *vm, const njs_str_t *path, njs_value_t *retval)
             return NJS_ERROR;
         }
 
-        ret = njs_atom_string_create(vm, &key, start, size);
+        ret = njs_string_set(vm, &key, start, size);
         if (njs_slow_path(ret != NJS_OK)) {
             return NJS_ERROR;
         }
 
-        ret = njs_value_property(vm, &value, key.atom_id,
-                                 njs_value_arg(retval));
-        if (njs_slow_path(ret == NJS_ERROR)) {
+        ret = njs_value_property(vm, &value, &key, njs_value_arg(retval));
+        if (njs_slow_path(ret != NJS_OK)) {
             return ret;
         }
 
@@ -895,24 +742,29 @@ njs_vm_value(njs_vm_t *vm, const njs_str_t *path, njs_value_t *retval)
 }
 
 
-static njs_int_t
-njs_vm_bind2(njs_vm_t *vm, const njs_str_t *var_name, njs_object_prop_t *prop,
+njs_int_t
+njs_vm_bind(njs_vm_t *vm, const njs_str_t *var_name, const njs_value_t *value,
     njs_bool_t shared)
 {
-    njs_int_t            ret;
-    njs_value_t          prop_name;
-    njs_object_t         *global;
-    njs_flathsh_t        *hash;
-    njs_flathsh_query_t  lhq;
+    njs_int_t           ret;
+    njs_object_t        *global;
+    njs_lvlhsh_t        *hash;
+    njs_object_prop_t   *prop;
+    njs_lvlhsh_query_t  lhq;
 
-    ret = njs_atom_string_create(vm, &prop_name, var_name->start,
-                                 var_name->length);
+    prop = njs_object_prop_alloc(vm, &njs_value_undefined, value, 1);
+    if (njs_slow_path(prop == NULL)) {
+        return NJS_ERROR;
+    }
+
+    ret = njs_string_new(vm, &prop->name, var_name->start, var_name->length, 0);
     if (njs_slow_path(ret != NJS_OK)) {
         return NJS_ERROR;
     }
 
     lhq.value = prop;
-    lhq.key_hash = prop_name.atom_id;
+    lhq.key = *var_name;
+    lhq.key_hash = njs_djb_hash(lhq.key.start, lhq.key.length);
     lhq.replace = 1;
     lhq.pool = vm->mem_pool;
     lhq.proto = &njs_object_hash_proto;
@@ -920,7 +772,7 @@ njs_vm_bind2(njs_vm_t *vm, const njs_str_t *var_name, njs_object_prop_t *prop,
     global = &vm->global_object;
     hash = shared ? &global->shared_hash : &global->hash;
 
-    ret = njs_flathsh_unique_insert(hash, &lhq);
+    ret = njs_lvlhsh_insert(hash, &lhq);
     if (njs_slow_path(ret != NJS_OK)) {
         njs_internal_error(vm, "lvlhsh insert failed");
         return ret;
@@ -930,48 +782,18 @@ njs_vm_bind2(njs_vm_t *vm, const njs_str_t *var_name, njs_object_prop_t *prop,
 }
 
 
-njs_int_t
-njs_vm_bind(njs_vm_t *vm, const njs_str_t *var_name, const njs_value_t *value,
-    njs_bool_t shared)
-{
-    njs_object_prop_t   *prop;
-
-    prop = njs_object_prop_alloc(vm, value, 1);
-    if (njs_slow_path(prop == NULL)) {
-        return NJS_ERROR;
-    }
-
-    return njs_vm_bind2(vm, var_name, prop, shared);
-}
-
-
-njs_int_t
-njs_vm_bind_handler(njs_vm_t *vm, const njs_str_t *var_name,
-    njs_prop_handler_t handler, uint16_t magic16, uint32_t magic32,
-    njs_bool_t shared)
-{
-    njs_object_prop_t  *prop;
-
-    prop = njs_object_prop_alloc(vm, &njs_value_invalid, 1);
-    if (njs_slow_path(prop == NULL)) {
-        return NJS_ERROR;
-    }
-
-    prop->type = NJS_PROPERTY_HANDLER;
-    prop->u.value.type = NJS_INVALID;
-    prop->u.value.data.truth = 1;
-    njs_prop_magic16(prop) = magic16;
-    njs_prop_magic32(prop) = magic32;
-    njs_prop_handler(prop) = handler;
-
-    return njs_vm_bind2(vm, var_name, prop, shared);
-}
-
-
 void
-njs_value_string_get(njs_vm_t *vm, njs_value_t *value, njs_str_t *dst)
+njs_value_string_get(njs_value_t *value, njs_str_t *dst)
 {
-    njs_string_get(vm, value, dst);
+    njs_string_get(value, dst);
+}
+
+
+njs_int_t
+njs_vm_value_string_set(njs_vm_t *vm, njs_value_t *value, const u_char *start,
+    uint32_t size)
+{
+    return njs_string_set(vm, value, start, size);
 }
 
 
@@ -1003,11 +825,18 @@ njs_vm_value_buffer_set(njs_vm_t *vm, njs_value_t *value, const u_char *start,
 }
 
 
+u_char *
+njs_vm_value_string_alloc(njs_vm_t *vm, njs_value_t *value, uint32_t size)
+{
+    return njs_string_alloc(vm, value, size, 0);
+}
+
+
 njs_int_t
 njs_vm_value_string_create(njs_vm_t *vm, njs_value_t *value,
     const u_char *start, uint32_t size)
 {
-    return njs_string_create(vm, value, start, size);
+    return njs_string_create(vm, value, (const char *) start, size);
 }
 
 
@@ -1049,30 +878,65 @@ njs_vm_prop_magic32(njs_object_prop_t *prop)
 
 
 njs_int_t
-njs_vm_prop_name(njs_vm_t *vm, uint32_t atom_id, njs_str_t *dst)
+njs_vm_prop_name(njs_vm_t *vm, njs_object_prop_t *prop, njs_str_t *dst)
 {
-    njs_int_t    ret;
-    njs_value_t  prop_name;
-
-    ret = njs_atom_to_value(vm, &prop_name, atom_id);
-    if (ret != NJS_OK) {
+    if (njs_slow_path(!njs_is_string(&prop->name))) {
+        njs_type_error(vm, "property name is not a string");
         return NJS_ERROR;
     }
 
-    if (njs_slow_path(!njs_is_string(&prop_name))) {
-        return NJS_ERROR;
-    }
-
-    njs_string_get(vm, &prop_name, dst);
+    njs_string_get(&prop->name, dst);
 
     return NJS_OK;
 }
 
 
 njs_noinline void
+njs_vm_value_error_set(njs_vm_t *vm, njs_value_t *value, const char *fmt, ...)
+{
+    va_list  args;
+    u_char   buf[NJS_MAX_ERROR_STR], *p;
+
+    p = buf;
+
+    if (fmt != NULL) {
+        va_start(args, fmt);
+        p = njs_vsprintf(buf, buf + sizeof(buf), fmt, args);
+        va_end(args);
+    }
+
+    njs_error_new(vm, value, NJS_OBJ_TYPE_ERROR, buf, p - buf);
+}
+
+
+njs_noinline void
 njs_vm_memory_error(njs_vm_t *vm)
 {
-    njs_memory_error_set(vm, &vm->exception);
+    njs_memory_error_set(vm, &vm->retval);
+}
+
+
+njs_noinline void
+njs_vm_logger(njs_vm_t *vm, njs_log_level_t level, const char *fmt, ...)
+{
+    u_char        *p;
+    va_list       args;
+    njs_logger_t  logger;
+    u_char        buf[32768];
+
+    if (vm->options.ops == NULL) {
+        return;
+    }
+
+    logger = vm->options.ops->logger;
+
+    if (logger != NULL && vm->options.log_level >= level) {
+        va_start(args, fmt);
+        p = njs_vsprintf(buf, buf + sizeof(buf), fmt, args);
+        va_end(args);
+
+        logger(vm, vm->external, level, buf, p - buf);
+    }
 }
 
 
@@ -1081,23 +945,12 @@ njs_vm_value_string(njs_vm_t *vm, njs_str_t *dst, njs_value_t *src)
 {
     njs_int_t    ret;
     njs_uint_t   exception;
-    njs_value_t  value;
-
-    if (njs_slow_path(vm->top_frame == NULL)) {
-        /* An exception was thrown during compilation. */
-        njs_vm_runtime_init(vm);
-    }
-
-    if (njs_is_valid(&vm->exception)) {
-        value = njs_vm_exception(vm);
-        src = &value;
-    }
 
     if (njs_slow_path(src->type == NJS_NUMBER
                       && njs_number(src) == 0
                       && signbit(njs_number(src))))
     {
-        *dst = njs_str_value("-0");
+        njs_string_get(&njs_string_minus_zero, dst);
         return NJS_OK;
     }
 
@@ -1115,7 +968,7 @@ again:
 
         /* value evaluation threw an exception. */
 
-        *src = njs_vm_exception(vm);
+        src = &vm->retval;
         goto again;
     }
 
@@ -1127,94 +980,40 @@ again:
 
 
 njs_int_t
-njs_vm_exception_string(njs_vm_t *vm, njs_str_t *dst)
+njs_vm_retval_string(njs_vm_t *vm, njs_str_t *dst)
 {
-    njs_value_t  exception;
+    if (vm->top_frame == NULL) {
+        /* An exception was thrown during compilation. */
 
-    exception = njs_vm_exception(vm);
+        njs_vm_init(vm);
+    }
 
-    return njs_vm_value_string(vm, dst, &exception);
+    return njs_vm_value_string(vm, dst, &vm->retval);
 }
 
 
-njs_value_t *
-njs_vm_value_enumerate(njs_vm_t *vm, njs_value_t *value, uint32_t flags,
-    njs_value_t *retval)
+njs_int_t
+njs_vm_retval_dump(njs_vm_t *vm, njs_str_t *dst, njs_uint_t indent)
 {
-    njs_value_t          *val;
-    njs_array_t          *keys;
-    njs_rbtree_t         *variables;
-    njs_rbtree_node_t    *rb_node;
-    njs_variable_node_t  *node;
+    if (vm->top_frame == NULL) {
+        /* An exception was thrown during compilation. */
 
-    keys = njs_value_enumerate(vm, value, flags);
-    if (njs_slow_path(keys == NULL)) {
-        return NULL;
+        njs_vm_init(vm);
     }
 
-    if (!njs_values_same(vm, value, &vm->global_value)
-        || vm->global_scope == NULL)
-    {
-        goto done;
-    }
-
-    /* TODO: workaround for values in global object. */
-
-    variables = &vm->global_scope->variables;
-    rb_node = njs_rbtree_min(variables);
-
-    while (njs_rbtree_is_there_successor(variables, rb_node)) {
-        node = (njs_variable_node_t *) rb_node;
-
-        if (node->variable->atom_id == NJS_ATOM_STRING_this) {
-            rb_node = njs_rbtree_node_successor(variables, rb_node);
-            continue;
-        }
-
-        val = njs_array_push(vm, keys);
-        if (njs_slow_path(value == NULL)) {
-            return NULL;
-        }
-
-        njs_atom_to_value(vm, val, node->variable->atom_id);
-
-        rb_node = njs_rbtree_node_successor(variables, rb_node);
-    }
-
-done:
-
-     njs_set_array(retval, keys);
-
-     return retval;
-}
-
-
-njs_value_t *
-njs_vm_value_own_enumerate(njs_vm_t *vm, njs_value_t *value, uint32_t flags,
-    njs_value_t *retval)
-{
-    njs_array_t  *keys;
-
-    keys = njs_value_own_enumerate(vm, value, flags);
-    if (njs_slow_path(keys == NULL)) {
-        return NULL;
-    }
-
-    njs_set_array(retval, keys);
-
-    return retval;
+    return njs_vm_value_dump(vm, dst, &vm->retval, 0, 1);
 }
 
 
 njs_int_t
 njs_vm_object_alloc(njs_vm_t *vm, njs_value_t *retval, ...)
 {
-    va_list              args;
-    njs_int_t            ret;
-    njs_value_t          *name, *value;
-    njs_object_t         *object;
-    njs_object_prop_t    *prop;
-    njs_flathsh_query_t  lhq;
+    va_list             args;
+    njs_int_t           ret;
+    njs_value_t         *name, *value;
+    njs_object_t        *object;
+    njs_object_prop_t   *prop;
+    njs_lvlhsh_query_t  lhq;
 
     object = njs_object_alloc(vm);
     if (njs_slow_path(object == NULL)) {
@@ -1242,25 +1041,21 @@ njs_vm_object_alloc(njs_vm_t *vm, njs_value_t *retval, ...)
             goto done;
         }
 
-        prop = njs_object_prop_alloc(vm, value, 1);
-        if (njs_slow_path(prop == NULL)) {
-            goto done;
-        }
-
-        if (name->atom_id == NJS_ATOM_STRING_unknown) {
-            ret = njs_atom_atomize_key(vm, name);
-            if (ret != NJS_OK) {
-                goto done;
-            }
-        }
-
-        lhq.value = prop;
-        lhq.key_hash = name->atom_id;
         lhq.replace = 0;
         lhq.pool = vm->mem_pool;
         lhq.proto = &njs_object_hash_proto;
 
-        ret = njs_flathsh_unique_insert(&object->hash, &lhq);
+        njs_string_get(name, &lhq.key);
+        lhq.key_hash = njs_djb_hash(lhq.key.start, lhq.key.length);
+
+        prop = njs_object_prop_alloc(vm, name, value, 1);
+        if (njs_slow_path(prop == NULL)) {
+            goto done;
+        }
+
+        lhq.value = prop;
+
+        ret = njs_lvlhsh_insert(&object->hash, &lhq);
         if (njs_slow_path(ret != NJS_OK)) {
             njs_internal_error(vm, NULL);
             goto done;
@@ -1284,8 +1079,8 @@ njs_vm_object_keys(njs_vm_t *vm, njs_value_t *value, njs_value_t *retval)
 {
     njs_array_t  *keys;
 
-    keys = njs_value_own_enumerate(vm, value, NJS_ENUM_KEYS | NJS_ENUM_STRING
-                                   | NJS_ENUM_ENUMERABLE_ONLY);
+    keys = njs_value_own_enumerate(vm, value, NJS_ENUM_KEYS,
+                                   NJS_ENUM_STRING, 0);
     if (njs_slow_path(keys == NULL)) {
         return NULL;
     }
@@ -1293,19 +1088,6 @@ njs_vm_object_keys(njs_vm_t *vm, njs_value_t *value, njs_value_t *retval)
     njs_set_array(retval, keys);
 
     return retval;
-}
-
-
-njs_int_t
-njs_vm_prototype(njs_vm_t *vm, njs_value_t *value, njs_value_t *retval)
-{
-    njs_value_t arguments[2];
-
-    njs_set_undefined(&arguments[0]);
-    njs_value_assign(&arguments[1], value);
-
-    return njs_object_get_prototype_of(vm, njs_value_arg(&arguments), 2, 0,
-                                       retval);
 }
 
 
@@ -1350,44 +1132,17 @@ njs_vm_object_prop(njs_vm_t *vm, njs_value_t *value, const njs_str_t *prop,
         return NULL;
     }
 
-    ret = njs_vm_value_string_create(vm, &key, prop->start, prop->length);
+    ret = njs_vm_value_string_set(vm, &key, prop->start, prop->length);
     if (njs_slow_path(ret != NJS_OK)) {
         return NULL;
     }
 
-    ret = njs_value_property_val(vm, value, &key, njs_value_arg(retval));
+    ret = njs_value_property(vm, value, &key, njs_value_arg(retval));
     if (njs_slow_path(ret != NJS_OK)) {
         return NULL;
     }
 
     return njs_value_arg(retval);
-}
-
-
-njs_int_t
-njs_vm_object_prop_set(njs_vm_t *vm, njs_value_t *value, const njs_str_t *prop,
-    njs_opaque_value_t *setval)
-{
-    njs_int_t    ret;
-    njs_value_t  key;
-
-    if (njs_slow_path(!njs_is_object(value))) {
-        njs_type_error(vm, "njs_vm_object_prop_set() argument is not object");
-        return NJS_ERROR;
-    }
-
-    ret = njs_atom_string_create(vm, &key, prop->start, prop->length);
-    if (njs_slow_path(ret != NJS_OK)) {
-        return NJS_ERROR;
-    }
-
-    ret = njs_value_property_set(vm, value, key.atom_id,
-                                 njs_value_arg(setval));
-    if (njs_slow_path(ret != NJS_OK)) {
-        return NJS_ERROR;
-    }
-
-    return NJS_OK;
 }
 
 
@@ -1422,14 +1177,6 @@ njs_vm_array_prop(njs_vm_t *vm, njs_value_t *value, int64_t index,
 }
 
 
-njs_int_t
-njs_vm_object_iterate(njs_vm_t *vm, njs_iterator_args_t *args,
-    njs_iterator_handler_t handler, njs_value_t *retval)
-{
-    return njs_object_iterate(vm, args, handler, retval);
-}
-
-
 njs_value_t *
 njs_vm_array_start(njs_vm_t *vm, njs_value_t *value)
 {
@@ -1454,24 +1201,10 @@ njs_vm_array_length(njs_vm_t *vm, njs_value_t *value, int64_t *length)
 
 
 njs_int_t
-njs_vm_date_alloc(njs_vm_t *vm, njs_value_t *retval, double time)
-{
-    njs_date_t  *date;
-
-    date = njs_date_alloc(vm, time);
-    if (njs_slow_path(date == NULL)) {
-        return NJS_ERROR;
-    }
-
-    njs_set_date(retval, date);
-
-    return NJS_OK;
-}
-
-
-njs_int_t
 njs_vm_value_to_string(njs_vm_t *vm, njs_str_t *dst, njs_value_t *src)
 {
+    u_char       *start;
+    size_t       size;
     njs_int_t    ret;
     njs_value_t  value, stack;
 
@@ -1481,7 +1214,7 @@ njs_vm_value_to_string(njs_vm_t *vm, njs_str_t *dst, njs_value_t *src)
 
     if (njs_is_error(src)) {
         if (njs_is_memory_error(vm, src)) {
-            *dst = njs_str_value("MemoryError");
+            njs_string_get(&njs_string_memory_error, dst);
             return NJS_OK;
         }
 
@@ -1500,7 +1233,24 @@ njs_vm_value_to_string(njs_vm_t *vm, njs_str_t *dst, njs_value_t *src)
     ret = njs_value_to_string(vm, &value, &value);
 
     if (njs_fast_path(ret == NJS_OK)) {
-        njs_string_get(vm, &value, dst);
+        size = value.short_string.size;
+
+        if (size != NJS_STRING_LONG) {
+            start = njs_mp_alloc(vm->mem_pool, size);
+            if (njs_slow_path(start == NULL)) {
+                njs_memory_error(vm);
+                return NJS_ERROR;
+            }
+
+            memcpy(start, value.short_string.start, size);
+
+        } else {
+            size = value.long_string.size;
+            start = value.long_string.data->start;
+        }
+
+        dst->length = size;
+        dst->start = start;
     }
 
     return ret;
@@ -1515,12 +1265,24 @@ njs_vm_value_to_string(njs_vm_t *vm, njs_str_t *dst, njs_value_t *src)
 const char *
 njs_vm_value_to_c_string(njs_vm_t *vm, njs_value_t *value)
 {
-    u_char  *p, *data;
+    u_char  *p, *data, *start;
     size_t  size;
 
     njs_assert(njs_is_string(value));
 
-    size = value->string.data->size;
+    if (value->short_string.size != NJS_STRING_LONG) {
+        start = value->short_string.start;
+        size = value->short_string.size;
+
+        if (size < NJS_STRING_SHORT) {
+            start[size] = '\0';
+            return (const char *) start;
+        }
+
+    } else {
+        start = value->long_string.data->start;
+        size = value->long_string.size;
+    }
 
     data = njs_mp_alloc(vm->mem_pool, size + njs_length("\0"));
     if (njs_slow_path(data == NULL)) {
@@ -1528,7 +1290,7 @@ njs_vm_value_to_c_string(njs_vm_t *vm, njs_value_t *value)
         return NULL;
     }
 
-    p = njs_cpymem(data, value->string.data->start, size);
+    p = njs_cpymem(data, start, size);
     *p++ = '\0';
 
     return (const char *) data;
@@ -1536,34 +1298,10 @@ njs_vm_value_to_c_string(njs_vm_t *vm, njs_value_t *value)
 
 
 njs_int_t
-njs_value_to_string(njs_vm_t *vm, njs_value_t *dst, njs_value_t *value)
-{
-    njs_int_t    ret;
-    njs_value_t  primitive;
-
-    if (njs_slow_path(!njs_is_primitive(value))) {
-        if (njs_slow_path(njs_is_object_symbol(value))) {
-            /* should fail */
-            value = njs_object_value(value);
-
-        } else {
-            ret = njs_value_to_primitive(vm, &primitive, value, 1);
-            if (njs_slow_path(ret != NJS_OK)) {
-                return ret;
-            }
-
-            value = &primitive;
-        }
-    }
-
-    return njs_primitive_value_to_string(vm, dst, value);
-}
-
-
-njs_int_t
 njs_vm_value_to_bytes(njs_vm_t *vm, njs_str_t *dst, njs_value_t *src)
 {
-    size_t              length, offset;
+    u_char              *start;
+    size_t              size, length, offset;
     njs_int_t           ret;
     njs_value_t         value;
     njs_typed_array_t   *array;
@@ -1594,12 +1332,6 @@ njs_vm_value_to_bytes(njs_vm_t *vm, njs_str_t *dst, njs_value_t *src)
         }
 
         if (njs_slow_path(njs_is_detached_buffer(buffer))) {
-            if (length == 0) {
-                dst->length = 0;
-                dst->start = NULL;
-                return NJS_OK;
-            }
-
             njs_type_error(vm, "detached buffer");
             return NJS_ERROR;
         }
@@ -1614,8 +1346,24 @@ njs_vm_value_to_bytes(njs_vm_t *vm, njs_str_t *dst, njs_value_t *src)
             return NJS_ERROR;
         }
 
-        dst->length = value.string.data->size;
-        dst->start = value.string.data->start;
+        size = value.short_string.size;
+
+        if (size != NJS_STRING_LONG) {
+            start = njs_mp_alloc(vm->mem_pool, size);
+            if (njs_slow_path(start == NULL)) {
+                njs_memory_error(vm);
+                return NJS_ERROR;
+            }
+
+            memcpy(start, value.short_string.start, size);
+
+        } else {
+            size = value.long_string.size;
+            start = value.long_string.data->start;
+        }
+
+        dst->length = size;
+        dst->start = start;
     }
 
     return ret;
@@ -1623,17 +1371,57 @@ njs_vm_value_to_bytes(njs_vm_t *vm, njs_str_t *dst, njs_value_t *src)
 
 
 njs_int_t
-njs_vm_string_compare(njs_vm_t *vm, const njs_value_t *v1,
-    const njs_value_t *v2)
+njs_vm_string_compare(const njs_value_t *v1, const njs_value_t *v2)
 {
-    return njs_string_cmp(vm, v1, v2);
+    return njs_string_cmp(v1, v2);
+}
+
+
+njs_int_t
+njs_vm_value_string_copy(njs_vm_t *vm, njs_str_t *retval,
+    njs_value_t *value, uintptr_t *next)
+{
+    uintptr_t    n;
+    njs_array_t  *array;
+
+    switch (value->type) {
+
+    case NJS_STRING:
+        if (*next != 0) {
+            return NJS_DECLINED;
+        }
+
+        *next = 1;
+        break;
+
+    case NJS_ARRAY:
+        array = njs_array(value);
+
+        do {
+            n = (*next)++;
+
+            if (n == array->length) {
+                return NJS_DECLINED;
+            }
+
+            value = &array->start[n];
+
+        } while (!njs_is_valid(value));
+
+        break;
+
+    default:
+        return NJS_ERROR;
+    }
+
+    return njs_vm_value_to_string(vm, retval, value);
 }
 
 
 void *
 njs_lvlhsh_alloc(void *data, size_t size)
 {
-    return njs_mp_align(data, NJS_MAX_ALIGNMENT, size);
+    return njs_mp_align(data, size, size);
 }
 
 

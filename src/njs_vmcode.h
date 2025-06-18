@@ -23,14 +23,17 @@
 
 
 typedef intptr_t                        njs_jump_off_t;
-typedef uint8_t                         njs_vmcode_t;
+typedef uint8_t                         njs_vmcode_operation_t;
+
+
+#define NJS_VMCODE_3OPERANDS            0
+#define NJS_VMCODE_2OPERANDS            1
 
 
 enum {
     NJS_VMCODE_PUT_ARG = 0,
     NJS_VMCODE_STOP,
     NJS_VMCODE_JUMP,
-    NJS_VMCODE_PROPERTY_ATOM_SET,
     NJS_VMCODE_PROPERTY_SET,
     NJS_VMCODE_PROPERTY_ACCESSOR,
     NJS_VMCODE_IF_TRUE_JUMP,
@@ -38,6 +41,7 @@ enum {
     NJS_VMCODE_IF_EQUAL_JUMP,
     NJS_VMCODE_PROPERTY_INIT,
     NJS_VMCODE_RETURN,
+    NJS_VMCODE_FUNCTION_COPY,
     NJS_VMCODE_FUNCTION_FRAME,
     NJS_VMCODE_METHOD_FRAME,
     NJS_VMCODE_FUNCTION_CALL,
@@ -63,7 +67,6 @@ enum {
     NJS_VMCODE_ASSIGNMENT_ERROR,
     NJS_VMCODE_ERROR,
     NJS_VMCODE_MOVE,
-    NJS_VMCODE_PROPERTY_ATOM_GET,
     NJS_VMCODE_PROPERTY_GET,
     NJS_VMCODE_INCREMENT,
     NJS_VMCODE_POST_INCREMENT,
@@ -89,6 +92,7 @@ enum {
     NJS_VMCODE_LEFT_SHIFT,
     NJS_VMCODE_RIGHT_SHIFT,
     NJS_VMCODE_UNSIGNED_RIGHT_SHIFT,
+    NJS_VMCODE_OBJECT_COPY,
     NJS_VMCODE_TEMPLATE_LITERAL,
     NJS_VMCODE_PROPERTY_IN,
     NJS_VMCODE_PROPERTY_DELETE,
@@ -113,6 +117,12 @@ enum {
     NJS_VMCODE_DEBUGGER,
     NJS_VMCODES
 };
+
+
+typedef struct {
+    njs_vmcode_operation_t     operation;
+    uint8_t                    operands;   /* 2 bits */
+} njs_vmcode_t;
 
 
 typedef struct {
@@ -382,6 +392,13 @@ typedef struct {
 
 typedef struct {
     njs_vmcode_t               code;
+    njs_value_t                *function;
+    njs_index_t                retval;
+} njs_vmcode_function_copy_t;
+
+
+typedef struct {
+    njs_vmcode_t               code;
     njs_index_t                retval;
     njs_mod_t                  *module;
 } njs_vmcode_import_t;
@@ -405,7 +422,7 @@ typedef struct {
 } njs_vmcode_await_t;
 
 
-njs_int_t njs_vmcode_interpreter(njs_vm_t *vm, u_char *pc, njs_value_t *retval,
+njs_int_t njs_vmcode_interpreter(njs_vm_t *vm, u_char *pc,
     void *promise_cap, void *async_ctx);
 
 njs_object_t *njs_function_new_object(njs_vm_t *vm, njs_value_t *constructor);

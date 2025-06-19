@@ -1973,7 +1973,7 @@ njs_xml_error(njs_vm_t *vm, njs_xml_doc_t *current, const char *fmt, ...)
 {
     u_char         *p, *last;
     va_list        args;
-    xmlError       *err;
+    const xmlError       *err;
     u_char         errstr[NJS_MAX_ERROR_STR];
 
     last = &errstr[NJS_MAX_ERROR_STR];
